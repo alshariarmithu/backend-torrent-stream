@@ -1,283 +1,255 @@
-"""
-User list management:
-  Watchlist / Wishlist / Watch Later / Playlists
-"""
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
-from pydantic import BaseModel
-from typing import Optional
 from datetime import datetime
 
-from database import (
-    get_db, User, TorrentItem,
-    WatchlistItem, WishlistItem, WatchLaterItem,
-    Playlist, PlaylistItem,
-)
+from fastapi import APIRouter, Depends, HTTPException
+
 from auth import get_current_user
+from models import (
+    Playlist,
+    PlaylistCreate,
+    PlaylistEntry,
+    PlaylistItemAdd,
+    TorrentItem,
+    TorrentPayload,
+    User,
+    WatchLaterItem,
+    WatchlistItem,
+    WishlistItem,
+)
 
 router = APIRouter()
 
 
-# ─── Schemas ─────────────────────────────────────────────────────────────────
-
-class TorrentPayload(BaseModel):
-    name:     str
-    size:     Optional[str] = ""
-    seeders:  Optional[str] = "0"
-    leechers: Optional[str] = "0"
-    magnet:   Optional[str] = ""
-    hash:     Optional[str] = ""
-    poster:   Optional[str] = ""
-    category: Optional[str] = ""
-    site:     Optional[str] = ""
-    url:      Optional[str] = ""
-
-
-class PlaylistCreate(BaseModel):
-    name:        str
-    description: Optional[str] = ""
-
-class PlaylistItemAdd(BaseModel):
-    torrent:  TorrentPayload
-    position: Optional[int] = 0
-
-
-# ─── Internal helpers ─────────────────────────────────────────────────────────
-
-def _torrent_dict(t: TorrentItem) -> dict:
+def torrent_dict(t: TorrentItem) -> dict:
     return {
-        "id":       t.id,
-        "name":     t.name,
-        "size":     t.size     or "",
-        "seeders":  t.seeders  or "0",
+        "id": str(t.id),
+        "name": t.name,
+        "size": t.size or "",
+        "seeders": t.seeders or "0",
         "leechers": t.leechers or "0",
-        "magnet":   t.magnet   or "",
-        "hash":     t.hash     or "",
-        "poster":   t.poster   or "",
+        "magnet": t.magnet or "",
+        "hash": t.hash or "",
+        "poster": t.poster or "",
         "category": t.category or "",
-        "site":     t.site     or "",
-        "url":      t.url      or "",
+        "site": t.site or "",
+        "url": t.url or "",
         "added_at": t.added_at,
     }
 
 
-def _get_or_create_torrent(db: Session, payload: TorrentPayload) -> TorrentItem:
-    """Reuse existing torrent record by hash, or create a new one."""
+async def get_or_create_torrent(payload: TorrentPayload) -> TorrentItem:
     if payload.hash:
-        existing = db.query(TorrentItem).filter(TorrentItem.hash == payload.hash).first()
+        existing = await TorrentItem.find_one(TorrentItem.hash == payload.hash)
         if existing:
             return existing
-    # Pydantic v2: use model_dump(); v1: dict()
-    try:
-        data = payload.model_dump()
-    except AttributeError:
-        data = payload.dict()
-    item = TorrentItem(**data)
-    db.add(item)
-    db.flush()
+
+    item = TorrentItem(**payload.model_dump())
+    await item.insert()
     return item
 
 
-# ─── Watchlist ───────────────────────────────────────────────────────────────
+async def materialize_rows(rows: list[WatchlistItem | WishlistItem | WatchLaterItem]) -> list[dict]:
+    result: list[dict] = []
+    for row in rows:
+        torrent = await TorrentItem.get(row.torrent_id)
+        if torrent is None:
+            continue
+        entry = {
+            "list_id": str(row.id),
+            "added_at": row.added_at,
+            "torrent": torrent_dict(torrent),
+        }
+        if hasattr(row, "watched"):
+            entry["watched"] = getattr(row, "watched", False)
+        result.append(entry)
+    return result
+
 
 @router.get("/watchlist")
-def get_watchlist(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    rows = db.query(WatchlistItem).filter(WatchlistItem.user_id == user.id).all()
-    return [
-        {"list_id": r.id, "watched": r.watched, "added_at": r.added_at,
-         "torrent": _torrent_dict(r.torrent)}
-        for r in rows if r.torrent
-    ]
+async def get_watchlist(user: User = Depends(get_current_user)):
+    rows = await WatchlistItem.find(WatchlistItem.user_id == str(user.id)).to_list()
+    return await materialize_rows(rows)
 
 
 @router.post("/watchlist", status_code=201)
-def add_watchlist(
-    payload: TorrentPayload,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    torrent = _get_or_create_torrent(db, payload)
-    if db.query(WatchlistItem).filter_by(user_id=user.id, torrent_id=torrent.id).first():
-        raise HTTPException(400, "Already in watchlist")
-    db.add(WatchlistItem(user_id=user.id, torrent_id=torrent.id))
-    db.commit()
+async def add_watchlist(payload: TorrentPayload, user: User = Depends(get_current_user)):
+    torrent = await get_or_create_torrent(payload)
+    existing = await WatchlistItem.find_one(
+        WatchlistItem.user_id == str(user.id),
+        WatchlistItem.torrent_id == str(torrent.id),
+    )
+    if existing:
+        raise HTTPException(status_code=400, detail="Already in watchlist")
+    await WatchlistItem(user_id=str(user.id), torrent_id=str(torrent.id)).insert()
     return {"message": "Added to watchlist"}
 
 
 @router.patch("/watchlist/{item_id}/watched")
-def mark_watched(
-    item_id: int,
+async def mark_watched(
+    item_id: str,
     watched: bool = True,
     user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
 ):
-    item = db.query(WatchlistItem).filter_by(id=item_id, user_id=user.id).first()
-    if not item:
-        raise HTTPException(404, "Not found")
+    item = await WatchlistItem.get(item_id)
+    if not item or item.user_id != str(user.id):
+        raise HTTPException(status_code=404, detail="Not found")
     item.watched = watched
-    db.commit()
+    await item.save()
     return {"message": "Updated"}
 
 
 @router.delete("/watchlist/{item_id}", status_code=204)
-def remove_watchlist(item_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    item = db.query(WatchlistItem).filter_by(id=item_id, user_id=user.id).first()
-    if not item:
-        raise HTTPException(404, "Not found")
-    db.delete(item)
-    db.commit()
+async def remove_watchlist(item_id: str, user: User = Depends(get_current_user)):
+    item = await WatchlistItem.get(item_id)
+    if not item or item.user_id != str(user.id):
+        raise HTTPException(status_code=404, detail="Not found")
+    await item.delete()
 
-
-# ─── Wishlist ────────────────────────────────────────────────────────────────
 
 @router.get("/wishlist")
-def get_wishlist(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    rows = db.query(WishlistItem).filter(WishlistItem.user_id == user.id).all()
-    return [
-        {"list_id": r.id, "added_at": r.added_at, "torrent": _torrent_dict(r.torrent)}
-        for r in rows if r.torrent
-    ]
+async def get_wishlist(user: User = Depends(get_current_user)):
+    rows = await WishlistItem.find(WishlistItem.user_id == str(user.id)).to_list()
+    return await materialize_rows(rows)
 
 
 @router.post("/wishlist", status_code=201)
-def add_wishlist(
-    payload: TorrentPayload,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    torrent = _get_or_create_torrent(db, payload)
-    if db.query(WishlistItem).filter_by(user_id=user.id, torrent_id=torrent.id).first():
-        raise HTTPException(400, "Already in wishlist")
-    db.add(WishlistItem(user_id=user.id, torrent_id=torrent.id))
-    db.commit()
+async def add_wishlist(payload: TorrentPayload, user: User = Depends(get_current_user)):
+    torrent = await get_or_create_torrent(payload)
+    existing = await WishlistItem.find_one(
+        WishlistItem.user_id == str(user.id),
+        WishlistItem.torrent_id == str(torrent.id),
+    )
+    if existing:
+        raise HTTPException(status_code=400, detail="Already in wishlist")
+    await WishlistItem(user_id=str(user.id), torrent_id=str(torrent.id)).insert()
     return {"message": "Added to wishlist"}
 
 
 @router.delete("/wishlist/{item_id}", status_code=204)
-def remove_wishlist(item_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    item = db.query(WishlistItem).filter_by(id=item_id, user_id=user.id).first()
-    if not item:
-        raise HTTPException(404, "Not found")
-    db.delete(item)
-    db.commit()
+async def remove_wishlist(item_id: str, user: User = Depends(get_current_user)):
+    item = await WishlistItem.get(item_id)
+    if not item or item.user_id != str(user.id):
+        raise HTTPException(status_code=404, detail="Not found")
+    await item.delete()
 
-
-# ─── Watch Later ─────────────────────────────────────────────────────────────
 
 @router.get("/watchlater")
-def get_watchlater(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    rows = db.query(WatchLaterItem).filter(WatchLaterItem.user_id == user.id).all()
-    return [
-        {"list_id": r.id, "added_at": r.added_at, "torrent": _torrent_dict(r.torrent)}
-        for r in rows if r.torrent
-    ]
+async def get_watchlater(user: User = Depends(get_current_user)):
+    rows = await WatchLaterItem.find(WatchLaterItem.user_id == str(user.id)).to_list()
+    return await materialize_rows(rows)
 
 
 @router.post("/watchlater", status_code=201)
-def add_watchlater(
-    payload: TorrentPayload,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    torrent = _get_or_create_torrent(db, payload)
-    if db.query(WatchLaterItem).filter_by(user_id=user.id, torrent_id=torrent.id).first():
-        raise HTTPException(400, "Already in watch later")
-    db.add(WatchLaterItem(user_id=user.id, torrent_id=torrent.id))
-    db.commit()
+async def add_watchlater(payload: TorrentPayload, user: User = Depends(get_current_user)):
+    torrent = await get_or_create_torrent(payload)
+    existing = await WatchLaterItem.find_one(
+        WatchLaterItem.user_id == str(user.id),
+        WatchLaterItem.torrent_id == str(torrent.id),
+    )
+    if existing:
+        raise HTTPException(status_code=400, detail="Already in watch later")
+    await WatchLaterItem(user_id=str(user.id), torrent_id=str(torrent.id)).insert()
     return {"message": "Added to watch later"}
 
 
 @router.delete("/watchlater/{item_id}", status_code=204)
-def remove_watchlater(item_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    item = db.query(WatchLaterItem).filter_by(id=item_id, user_id=user.id).first()
-    if not item:
-        raise HTTPException(404, "Not found")
-    db.delete(item)
-    db.commit()
+async def remove_watchlater(item_id: str, user: User = Depends(get_current_user)):
+    item = await WatchLaterItem.get(item_id)
+    if not item or item.user_id != str(user.id):
+        raise HTTPException(status_code=404, detail="Not found")
+    await item.delete()
 
-
-# ─── Playlists ───────────────────────────────────────────────────────────────
 
 @router.get("/playlists")
-def get_playlists(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    playlists = db.query(Playlist).filter(Playlist.user_id == user.id).all()
-    return [{
-        "id":          p.id,
-        "name":        p.name,
-        "description": p.description,
-        "created_at":  p.created_at,
-        "item_count":  len(p.items),
-    } for p in playlists]
+async def get_playlists(user: User = Depends(get_current_user)):
+    playlists = await Playlist.find(Playlist.user_id == str(user.id)).to_list()
+    return [
+        {
+            "id": str(p.id),
+            "name": p.name,
+            "description": p.description,
+            "created_at": p.created_at,
+            "item_count": len(p.items),
+        }
+        for p in playlists
+    ]
 
 
 @router.post("/playlists", status_code=201)
-def create_playlist(
-    body: PlaylistCreate,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    pl = Playlist(user_id=user.id, name=body.name, description=body.description)
-    db.add(pl)
-    db.commit()
-    db.refresh(pl)
-    return {"id": pl.id, "name": pl.name, "description": pl.description}
+async def create_playlist(body: PlaylistCreate, user: User = Depends(get_current_user)):
+    pl = Playlist(user_id=str(user.id), name=body.name, description=body.description or "")
+    await pl.insert()
+    return {"id": str(pl.id), "name": pl.name, "description": pl.description, "created_at": pl.created_at, "item_count": 0}
 
 
 @router.get("/playlists/{playlist_id}")
-def get_playlist(playlist_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    pl = db.query(Playlist).filter_by(id=playlist_id, user_id=user.id).first()
-    if not pl:
-        raise HTTPException(404, "Playlist not found")
+async def get_playlist(playlist_id: str, user: User = Depends(get_current_user)):
+    pl = await Playlist.get(playlist_id)
+    if not pl or pl.user_id != str(user.id):
+        raise HTTPException(status_code=404, detail="Playlist not found")
+
     items = sorted(pl.items, key=lambda x: x.position)
+    materialized = []
+    for item in items:
+        torrent = await TorrentItem.get(item.torrent_id)
+        if torrent is None:
+            continue
+        materialized.append({
+            "item_id": item.id,
+            "position": item.position,
+            "torrent": torrent_dict(torrent),
+        })
+
     return {
-        "id":          pl.id,
-        "name":        pl.name,
+        "id": str(pl.id),
+        "name": pl.name,
         "description": pl.description,
-        "created_at":  pl.created_at,
-        "items": [
-            {"item_id": i.id, "position": i.position, "torrent": _torrent_dict(i.torrent)}
-            for i in items if i.torrent
-        ],
+        "created_at": pl.created_at,
+        "items": materialized,
     }
 
 
 @router.post("/playlists/{playlist_id}/items", status_code=201)
-def add_playlist_item(
-    playlist_id: int,
+async def add_playlist_item(
+    playlist_id: str,
     body: PlaylistItemAdd,
     user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
 ):
-    pl = db.query(Playlist).filter_by(id=playlist_id, user_id=user.id).first()
-    if not pl:
-        raise HTTPException(404, "Playlist not found")
-    torrent = _get_or_create_torrent(db, body.torrent)
-    db.add(PlaylistItem(playlist_id=pl.id, torrent_id=torrent.id, position=body.position))
-    db.commit()
+    pl = await Playlist.get(playlist_id)
+    if not pl or pl.user_id != str(user.id):
+        raise HTTPException(status_code=404, detail="Playlist not found")
+
+    torrent = await get_or_create_torrent(body.torrent)
+    pl.items.append(
+        PlaylistEntry(
+            torrent_id=str(torrent.id),
+            position=body.position or len(pl.items),
+            added_at=datetime.utcnow(),
+        )
+    )
+    await pl.save()
     return {"message": "Added to playlist"}
 
 
 @router.delete("/playlists/{playlist_id}/items/{item_id}", status_code=204)
-def remove_playlist_item(
-    playlist_id: int,
-    item_id: int,
+async def remove_playlist_item(
+    playlist_id: str,
+    item_id: str,
     user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
 ):
-    pl = db.query(Playlist).filter_by(id=playlist_id, user_id=user.id).first()
-    if not pl:
-        raise HTTPException(404, "Playlist not found")
-    item = db.query(PlaylistItem).filter_by(id=item_id, playlist_id=pl.id).first()
-    if not item:
-        raise HTTPException(404, "Item not found")
-    db.delete(item)
-    db.commit()
+    pl = await Playlist.get(playlist_id)
+    if not pl or pl.user_id != str(user.id):
+        raise HTTPException(status_code=404, detail="Playlist not found")
+
+    new_items = [item for item in pl.items if item.id != item_id]
+    if len(new_items) == len(pl.items):
+        raise HTTPException(status_code=404, detail="Item not found")
+    pl.items = new_items
+    await pl.save()
 
 
 @router.delete("/playlists/{playlist_id}", status_code=204)
-def delete_playlist(playlist_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    pl = db.query(Playlist).filter_by(id=playlist_id, user_id=user.id).first()
-    if not pl:
-        raise HTTPException(404, "Playlist not found")
-    db.delete(pl)
-    db.commit()
+async def delete_playlist(playlist_id: str, user: User = Depends(get_current_user)):
+    pl = await Playlist.get(playlist_id)
+    if not pl or pl.user_id != str(user.id):
+        raise HTTPException(status_code=404, detail="Playlist not found")
+    await pl.delete()

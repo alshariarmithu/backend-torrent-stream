@@ -1,1 +1,44 @@
-POST 
+@baseUrl = http://127.0.0.1:8081
+@json = Content-Type: application/json
+
+### Health
+GET {{baseUrl}}/health
+
+### Register
+POST {{baseUrl}}/auth/register
+{{json}}
+
+{
+  "name": "Test User",
+  "email": "test@example.com",
+  "password": "Test1234!"
+}
+
+### Login
+# @name login
+POST {{baseUrl}}/auth/login
+{{json}}
+
+{
+  "email": "test@example.com",
+  "password": "Test1234!"
+}
+
+### Extract token from login response
+## @token = {{login.response.body.access_token}}
+@token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI2OWQ1MmZhYTYwZTdkYmEzNmM2ZWQzYzYiLCJlbWFpbCI6InRlc3RAZXhhbXBsZS5jb20iLCJleHAiOjE3NzgxNzEwNTB9.jaKBYk5cpbrS0cjXBOd_zcUgzAu8drZz8nHFMvJk50s"
+### Current user / profile
+GET {{baseUrl}}/auth/me
+Authorization: Bearer {{token}}
+
+### Refresh token
+POST {{baseUrl}}/auth/refresh
+Authorization: Bearer {{token}}
+
+### Logout
+POST {{baseUrl}}/auth/logout
+Authorization: Bearer {{token}}
+
+### Protected route example
+GET {{baseUrl}}/users/me
+Authorization: Bearer {{token}}

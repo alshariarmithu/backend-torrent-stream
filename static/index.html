@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>TorrentStream — UI</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Arial, sans-serif; padding: 24px; max-width:800px; margin:auto }
+    h1{font-size:1.4rem}
+    form{margin-bottom:18px}
+    input,button{padding:8px 10px;margin:6px 0;width:100%;box-sizing:border-box}
+    .row{display:flex;gap:8px}
+    .row input{flex:1}
+    pre{background:#f6f8fa;padding:12px;border-radius:6px}
+  </style>
+</head>
+<body>
+  <h1>TorrentStream — Basic UI</h1>
+
+  <section>
+    <h2>Register</h2>
+    <form id="registerForm">
+      <input id="regEmail" type="email" placeholder="Email" required />
+      <input id="regPassword" type="password" placeholder="Password (min 8 chars)" required />
+      <button type="submit">Register</button>
+    </form>
+  </section>
+
+  <section>
+    <h2>Login</h2>
+    <form id="loginForm">
+      <input id="loginEmail" type="email" placeholder="Email" required />
+      <input id="loginPassword" type="password" placeholder="Password" required />
+      <button type="submit">Login</button>
+    </form>
+  </section>
+
+  <section>
+    <h2>Auth Token</h2>
+    <div style="display:flex;gap:8px;align-items:center">
+      <input id="tokenInput" type="text" placeholder="Paste token here or use login" style="flex:1" />
+      <button id="saveToken">Save</button>
+      <button id="clearToken">Clear</button>
+    </div>
+    <p>Current token: <code id="currentToken">(none)</code></p>
+  </section>
+
+  <section>
+    <h2>Search</h2>
+    <form id="searchForm">
+      <div class="row">
+        <input id="searchQuery" type="search" placeholder="Search query" required />
+        <select id="searchCategory">
+          <option value="all">All</option>
+          <option value="movies">Movies</option>
+          <option value="tv">TV</option>
+          <option value="4k">4K</option>
+          <option value="music">Music</option>
+          <option value="games">Games</option>
+          <option value="apps">Apps</option>
+        </select>
+      </div>
+      <button type="submit">Search</button>
+    </form>
+    <div id="results"></div>
+  </section>
+
+  <section>
+    <h2>Response</h2>
+    <pre id="out">No requests yet.</pre>
+  </section>
+
+  <script>
+    const out = document.getElementById('out');
+
+    function getStoredToken(){
+      return localStorage.getItem('ts_token') || '';
+    }
+
+    function setStoredToken(t){
+      if(t){
+        localStorage.setItem('ts_token', t);
+      } else {
+        localStorage.removeItem('ts_token');
+      }
+      renderToken();
+    }
+
+    function renderToken(){
+      const t = getStoredToken();
+      document.getElementById('currentToken').textContent = t ? t.slice(0,8) + '...' : '(none)';
+      document.getElementById('tokenInput').value = t;
+    }
+
+    async function postJson(path, body, includeAuth = false){
+      const headers = { 'Content-Type': 'application/json' };
+      if(includeAuth){
+        const t = getStoredToken();
+        if(t) headers['Authorization'] = 'Bearer ' + t;
+      }
+      const res = await fetch(path, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body)
+      });
+      const text = await res.text();
+      try{ return JSON.parse(text) }catch(e){ return text }
+    }
+
+    async function getJson(path, includeAuth = false){
+      const headers = {};
+      if(includeAuth){
+        const t = getStoredToken();
+        if(t) headers['Authorization'] = 'Bearer ' + t;
+      }
+      const res = await fetch(path, { headers });
+      const text = await res.text();
+      try{ return JSON.parse(text) }catch(e){ return text }
+    }
+
+    // register
+    document.getElementById('registerForm').addEventListener('submit', async e =>{
+      e.preventDefault();
+      const email = document.getElementById('regEmail').value;
+      const password = document.getElementById('regPassword').value;
+      const r = await postJson('/auth/register', { email, password });
+      out.textContent = JSON.stringify(r, null, 2);
+      if(r && r.access_token){ setStoredToken(r.access_token); }
+    });
+
+    // login
+    document.getElementById('loginForm').addEventListener('submit', async e =>{
+      e.preventDefault();
+      const email = document.getElementById('loginEmail').value;
+      const password = document.getElementById('loginPassword').value;
+      const r = await postJson('/auth/login', { email, password });
+      out.textContent = JSON.stringify(r, null, 2);
+      if(r && r.access_token){ setStoredToken(r.access_token); }
+    });
+
+    // token controls
+    document.getElementById('saveToken').addEventListener('click', ()=>{
+      const v = document.getElementById('tokenInput').value.trim();
+      setStoredToken(v);
+    });
+    document.getElementById('clearToken').addEventListener('click', ()=>{ setStoredToken(''); });
+
+    // search
+    function renderResults(data){
+      const container = document.getElementById('results');
+      if(!data || !data.data) { container.innerHTML = '<p>No results</p>'; return; }
+      const items = data.data;
+      container.innerHTML = items.map(i => `\n        <div style="padding:8px;border-bottom:1px solid #eee">\n          <strong>${i.name}</strong><br/>\n          Size: ${i.size} • Seeders: ${i.seeders} • Leechers: ${i.leechers}<br/>\n          <a href="${i.magnet}">Magnet Link</a>\n        </div>`).join('');
+    }
+
+    document.getElementById('searchForm').addEventListener('submit', async e =>{
+      e.preventDefault();
+      const q = document.getElementById('searchQuery').value.trim();
+      const cat = document.getElementById('searchCategory').value;
+      if(!q) return;
+      const path = `/search/?query=${encodeURIComponent(q)}&category=${encodeURIComponent(cat)}`;
+      const r = await getJson(path, true);
+      out.textContent = JSON.stringify(r, null, 2);
+      renderResults(r);
+    });
+
+    // initialize
+    renderToken();
+  </script>
+</body>
+</html>
