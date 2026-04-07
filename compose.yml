@@ -3,6 +3,4 @@ services:
     build: .
     ports:
       - "8081:8081"
-    volumes:
-      - .:/app
     env_file: .env
