@@ -3,10 +3,9 @@ Database setup using SQLAlchemy + SQLite
 """
 from sqlalchemy import (
     create_engine, Column, Integer, String, DateTime,
-    ForeignKey, Text, Boolean
+    ForeignKey, Text, Boolean,
 )
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, relationship
+from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 from datetime import datetime
 
 DATABASE_URL = "sqlite:///./torrentstream.db"
@@ -20,15 +19,15 @@ Base = declarative_base()
 
 class User(Base):
     __tablename__ = "users"
-    id = Column(Integer, primary_key=True, index=True)
-    email = Column(String, unique=True, index=True, nullable=False)
+    id              = Column(Integer, primary_key=True, index=True)
+    email           = Column(String, unique=True, index=True, nullable=False)
     hashed_password = Column(String, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at      = Column(DateTime, default=datetime.utcnow)
 
-    watchlist = relationship("WatchlistItem", back_populates="user", cascade="all, delete")
-    wishlist  = relationship("WishlistItem",  back_populates="user", cascade="all, delete")
-    watchlater= relationship("WatchLaterItem",back_populates="user", cascade="all, delete")
-    playlists = relationship("Playlist",      back_populates="user", cascade="all, delete")
+    watchlist  = relationship("WatchlistItem",  back_populates="user", cascade="all, delete")
+    wishlist   = relationship("WishlistItem",   back_populates="user", cascade="all, delete")
+    watchlater = relationship("WatchLaterItem", back_populates="user", cascade="all, delete")
+    playlists  = relationship("Playlist",       back_populates="user", cascade="all, delete")
 
 
 class TorrentItem(Base):
@@ -36,58 +35,58 @@ class TorrentItem(Base):
     __tablename__ = "torrent_items"
     id       = Column(Integer, primary_key=True, index=True)
     name     = Column(String,  nullable=False)
-    size     = Column(String)
-    seeders  = Column(String)
-    leechers = Column(String)
-    magnet   = Column(Text)
-    hash     = Column(String, index=True)
-    poster   = Column(String)
-    category = Column(String)
-    site     = Column(String)
-    url      = Column(String)
+    size     = Column(String,  default="")
+    seeders  = Column(String,  default="0")
+    leechers = Column(String,  default="0")
+    magnet   = Column(Text,    default="")
+    hash     = Column(String,  index=True, default="")
+    poster   = Column(String,  default="")
+    category = Column(String,  default="")
+    site     = Column(String,  default="")
+    url      = Column(String,  default="")
     added_at = Column(DateTime, default=datetime.utcnow)
 
 
 class WatchlistItem(Base):
     __tablename__ = "watchlist"
-    id       = Column(Integer, primary_key=True, index=True)
-    user_id  = Column(Integer, ForeignKey("users.id"), nullable=False)
+    id         = Column(Integer, primary_key=True, index=True)
+    user_id    = Column(Integer, ForeignKey("users.id"), nullable=False)
     torrent_id = Column(Integer, ForeignKey("torrent_items.id"))
-    watched  = Column(Boolean, default=False)
-    added_at = Column(DateTime, default=datetime.utcnow)
-    user     = relationship("User", back_populates="watchlist")
-    torrent  = relationship("TorrentItem")
+    watched    = Column(Boolean, default=False)
+    added_at   = Column(DateTime, default=datetime.utcnow)
+    user       = relationship("User", back_populates="watchlist")
+    torrent    = relationship("TorrentItem")
 
 
 class WishlistItem(Base):
     __tablename__ = "wishlist"
-    id       = Column(Integer, primary_key=True, index=True)
-    user_id  = Column(Integer, ForeignKey("users.id"), nullable=False)
+    id         = Column(Integer, primary_key=True, index=True)
+    user_id    = Column(Integer, ForeignKey("users.id"), nullable=False)
     torrent_id = Column(Integer, ForeignKey("torrent_items.id"))
-    added_at = Column(DateTime, default=datetime.utcnow)
-    user     = relationship("User", back_populates="wishlist")
-    torrent  = relationship("TorrentItem")
+    added_at   = Column(DateTime, default=datetime.utcnow)
+    user       = relationship("User", back_populates="wishlist")
+    torrent    = relationship("TorrentItem")
 
 
 class WatchLaterItem(Base):
     __tablename__ = "watchlater"
-    id       = Column(Integer, primary_key=True, index=True)
-    user_id  = Column(Integer, ForeignKey("users.id"), nullable=False)
+    id         = Column(Integer, primary_key=True, index=True)
+    user_id    = Column(Integer, ForeignKey("users.id"), nullable=False)
     torrent_id = Column(Integer, ForeignKey("torrent_items.id"))
-    added_at = Column(DateTime, default=datetime.utcnow)
-    user     = relationship("User", back_populates="watchlater")
-    torrent  = relationship("TorrentItem")
+    added_at   = Column(DateTime, default=datetime.utcnow)
+    user       = relationship("User", back_populates="watchlater")
+    torrent    = relationship("TorrentItem")
 
 
 class Playlist(Base):
     __tablename__ = "playlists"
-    id       = Column(Integer, primary_key=True, index=True)
-    user_id  = Column(Integer, ForeignKey("users.id"), nullable=False)
-    name     = Column(String, nullable=False)
+    id          = Column(Integer, primary_key=True, index=True)
+    user_id     = Column(Integer, ForeignKey("users.id"), nullable=False)
+    name        = Column(String, nullable=False)
     description = Column(String, default="")
     created_at  = Column(DateTime, default=datetime.utcnow)
-    user     = relationship("User", back_populates="playlists")
-    items    = relationship("PlaylistItem", back_populates="playlist", cascade="all, delete")
+    user        = relationship("User", back_populates="playlists")
+    items       = relationship("PlaylistItem", back_populates="playlist", cascade="all, delete")
 
 
 class PlaylistItem(Base):

@@ -1,20 +1,24 @@
-FROM python:3.11-slim
+# Use a prebuilt image with libtorrent & qbittorrent installed
+FROM wernight/qbittorrent:latest
 
-# Install libtorrent OS deps
-RUN apt-get update && apt-get install -y \
-    python3-libtorrent \
-    libboost-python-dev \
-    && rm -rf /var/lib/apt/lists/*
-
+# Set working directory
 WORKDIR /app
+
+# Copy Python dependencies
 COPY requirements.txt .
+
+# Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Copy the FastAPI app code
 COPY . .
 
-EXPOSE 8080
+# Expose FastAPI port
+EXPOSE 8000
 
+# Environment variables
 ENV TORRENT_DOWNLOAD_DIR=/data/torrents
 ENV JWT_SECRET=change-me-in-production
 
-CMD ["python", "main.py"]
+# Start FastAPI with Uvicorn
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

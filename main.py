@@ -2,10 +2,8 @@
 TorrentStream Server
 FastAPI backend with JWT auth, user lists, and torrent streaming
 """
-from fastapi import FastAPI, Depends, HTTPException, Header, Request, Response
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
-import uvicorn
 from contextlib import asynccontextmanager
 
 from database import init_db
@@ -36,10 +34,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(auth_router, prefix="/auth", tags=["Auth"])
-app.include_router(lists_router, prefix="/lists", tags=["Lists"])
-app.include_router(search_router, prefix="/search", tags=["Search"])
-app.include_router(stream_router, prefix="/stream", tags=["Stream"])
+app.include_router(auth_router,    prefix="/auth",   tags=["Auth"])
+app.include_router(lists_router,   prefix="/lists",  tags=["Lists"])
+app.include_router(search_router,  prefix="/search", tags=["Search"])
+app.include_router(stream_router,  prefix="/stream", tags=["Stream"])
 
 
 @app.get("/health")
@@ -48,4 +46,5 @@ async def health():
 
 
 if __name__ == "__main__":
+    import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8081, reload=True)

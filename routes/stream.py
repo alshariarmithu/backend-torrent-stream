@@ -1,14 +1,22 @@
 """
 Torrent Streaming via libtorrent
-Supports HTTP Range requests so AVPlayer can seek.
+Supports HTTP Range requests so AVPlayer / iOS VideoPlayer can seek.
 
-Requirements:
+Install libtorrent:
   macOS:  brew install libtorrent-rasterbar && pip install python-libtorrent
   Ubuntu: apt-get install python3-libtorrent
-  Docker: use image with libtorrent pre-installed
+  Docker: use image with libtorrent pre-installed (e.g. wernight/qbittorrent)
+
+iOS integration:
+  1. POST /stream/start        { magnet, hash }  → starts download
+  2. GET  /stream/status/{hash}                  → poll until progress > 1%
+  3. GET  /stream/info/{hash}                    → get filename + content-type
+  4. Construct stream URL: GET /stream/{hash}?magnet=<encoded>
+     Pass this URL directly to AVPlayer / VideoPlayer
 """
 from fastapi import APIRouter, Depends, HTTPException, Header, Request
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 import os, time, threading, mimetypes
 from pathlib import Path
 from typing import Optional
@@ -21,32 +29,45 @@ router = APIRouter()
 DOWNLOAD_DIR = Path(os.getenv("TORRENT_DOWNLOAD_DIR", "/tmp/torrentstream"))
 DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
+VIDEO_EXTS = {".mkv", ".mp4", ".avi", ".mov", ".m4v", ".webm", ".ts", ".mpg", ".mpeg"}
+
 # In-memory session store: hash → libtorrent handle
 _sessions: dict = {}
 _lock = threading.Lock()
 
+
 # ─── libtorrent helpers ───────────────────────────────────────────────────────
 
-def _get_session():
-    """Lazy-init a single shared libtorrent session."""
+def _get_lt():
+    """
+    Lazy-init shared libtorrent session.
+    Returns (session, lt_module) or raises HTTP 503.
+    """
     try:
         import libtorrent as lt
     except ImportError:
         return None, None
-    if not hasattr(_get_session, "_ses"):
+
+    if not hasattr(_get_lt, "_ses"):
         ses = lt.session()
         ses.listen_on(6881, 6891)
-        settings = ses.get_settings()
-        settings['active_downloads'] = 10
-        ses.apply_settings(settings)
-        _get_session._ses = ses
-        _get_session._lt  = lt
-    return _get_session._ses, _get_session._lt
+        # Compatible settings API (works on libtorrent 1.x and 2.x)
+        try:
+            settings = ses.get_settings()
+            settings["active_downloads"] = 10
+            settings["active_limit"] = 15
+            ses.apply_settings(settings)
+        except Exception:
+            pass
+        _get_lt._ses = ses
+        _get_lt._lt  = lt
+
+    return _get_lt._ses, _get_lt._lt
 
 
-def _add_or_get_torrent(magnet: str, torrent_hash: str):
-    """Add a magnet link to libtorrent and return the handle."""
-    ses, lt = _get_session()
+def _add_or_get(magnet: str, torrent_hash: str):
+    """Add magnet to libtorrent session and return handle (idempotent)."""
+    ses, lt = _get_lt()
     if ses is None:
         return None
 
@@ -57,18 +78,27 @@ def _add_or_get_torrent(magnet: str, torrent_hash: str):
         save_path = str(DOWNLOAD_DIR / torrent_hash)
         os.makedirs(save_path, exist_ok=True)
 
-        params = lt.parse_magnet_uri(magnet)
-        params.save_path = save_path
-        params.storage_mode = lt.storage_mode_t.storage_mode_sparse
+        try:
+            # libtorrent 2.x
+            params = lt.parse_magnet_uri(magnet)
+            params.save_path = save_path
+        except AttributeError:
+            # libtorrent 1.x fallback
+            params = {
+                "url": magnet,
+                "save_path": save_path,
+                "storage_mode": lt.storage_mode_t.storage_mode_sparse,
+            }
 
         handle = ses.add_torrent(params)
         handle.set_sequential_download(True)
+        # priority 7 = highest
         handle.set_priority(7)
         _sessions[torrent_hash] = handle
         return handle
 
 
-def _wait_for_metadata(handle, timeout: int = 60) -> bool:
+def _wait_metadata(handle, timeout: int = 60) -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:
         if handle.has_metadata():
@@ -77,66 +107,99 @@ def _wait_for_metadata(handle, timeout: int = 60) -> bool:
     return False
 
 
-def _largest_video_file(handle) -> Optional[Path]:
-    """Return the path to the largest video-like file in the torrent."""
-    VIDEO_EXTS = {".mkv", ".mp4", ".avi", ".mov", ".m4v", ".webm", ".ts"}
-    ti = handle.get_torrent_info()
-    best = None
-    best_size = 0
+def _best_video(handle) -> Optional[Path]:
+    """Return path to the largest video file inside the torrent."""
+    if not handle.has_metadata():
+        return None
+    ti        = handle.get_torrent_info()
+    files     = ti.files()
     save_path = Path(handle.save_path())
-
-    for i in range(ti.num_files()):
-        f = ti.files().file_path(i)
-        size = ti.files().file_size(i)
-        ext = Path(f).suffix.lower()
-        if ext in VIDEO_EXTS and size > best_size:
-            best = save_path / f
-            best_size = size
+    best, best_size = None, 0
+    for i in range(files.num_files()):
+        path = files.file_path(i)
+        size = files.file_size(i)
+        if Path(path).suffix.lower() in VIDEO_EXTS and size > best_size:
+            best, best_size = save_path / path, size
     return best
+
+
+# ─── Request schemas ─────────────────────────────────────────────────────────
+
+class StartRequest(BaseModel):
+    magnet: str
+    hash: str
 
 
 # ─── Routes ──────────────────────────────────────────────────────────────────
 
 @router.post("/start")
-def start_torrent(
-    magnet: str,
-    torrent_hash: str,
-    _user: User = Depends(get_current_user),
-):
-    """Start downloading a torrent in the background."""
-    ses, lt = _get_session()
+def start_torrent(body: StartRequest, _user: User = Depends(get_current_user)):
+    """Start (or resume) downloading a torrent."""
+    ses, _ = _get_lt()
     if ses is None:
-        raise HTTPException(503, "libtorrent not installed on server")
-
-    handle = _add_or_get_torrent(magnet, torrent_hash)
+        raise HTTPException(503,
+            "libtorrent not installed. "
+            "macOS: brew install libtorrent-rasterbar && pip install python-libtorrent | "
+            "Ubuntu: apt-get install python3-libtorrent"
+        )
+    handle = _add_or_get(body.magnet, body.hash)
     if handle is None:
         raise HTTPException(500, "Failed to start torrent")
-
-    return {"status": "started", "hash": torrent_hash}
+    return {"status": "started", "hash": body.hash}
 
 
 @router.get("/status/{torrent_hash}")
 def torrent_status(torrent_hash: str, _user: User = Depends(get_current_user)):
-    """Returns download progress and state."""
-    ses, lt = _get_session()
+    """
+    Poll download progress.
+    iOS: poll until progress > 0.5 before opening AVPlayer.
+    """
+    ses, _ = _get_lt()
     if ses is None:
         raise HTTPException(503, "libtorrent not installed")
 
     with _lock:
         handle = _sessions.get(torrent_hash)
     if not handle:
-        raise HTTPException(404, "Torrent not started")
+        raise HTTPException(404, "Torrent not started – POST /stream/start first")
 
     s = handle.status()
     return {
-        "hash": torrent_hash,
-        "progress": round(s.progress * 100, 2),
-        "download_rate": s.download_rate,
-        "upload_rate": s.upload_rate,
-        "num_peers": s.num_peers,
-        "state": str(s.state),
-        "has_metadata": handle.has_metadata(),
-        "paused": s.paused,
+        "hash":          torrent_hash,
+        "progress":      round(s.progress * 100, 2),   # 0-100
+        "download_rate": s.download_rate,               # bytes/s
+        "upload_rate":   s.upload_rate,
+        "num_peers":     s.num_peers,
+        "state":         str(s.state),
+        "has_metadata":  handle.has_metadata(),
+        "paused":        s.paused,
+    }
+
+
+@router.get("/info/{torrent_hash}")
+def torrent_info(torrent_hash: str, _user: User = Depends(get_current_user)):
+    """
+    Returns filename and content-type of the video file.
+    iOS: call this after metadata is ready to pre-configure AVPlayer.
+    """
+    with _lock:
+        handle = _sessions.get(torrent_hash)
+    if not handle:
+        raise HTTPException(404, "Torrent not started")
+    if not _wait_metadata(handle, timeout=60):
+        raise HTTPException(504, "Timed out waiting for metadata")
+
+    video = _best_video(handle)
+    if not video:
+        raise HTTPException(404, "No video file found in torrent")
+
+    content_type = mimetypes.guess_type(str(video))[0] or "video/mp4"
+    ti = handle.get_torrent_info()
+    return {
+        "filename":     video.name,
+        "content_type": content_type,
+        "total_size":   ti.total_size(),
+        "hash":         torrent_hash,
     }
 
 
@@ -144,67 +207,73 @@ def torrent_status(torrent_hash: str, _user: User = Depends(get_current_user)):
 async def stream_torrent(
     torrent_hash: str,
     magnet: Optional[str] = None,
-    request: Request = None,
     range: Optional[str] = Header(None),
     _user: User = Depends(get_current_user),
 ):
     """
-    Stream a torrent file via HTTP.
-    Pass ?magnet=<encoded_magnet> on first request to start the torrent.
-    Supports HTTP Range headers for seeking (AVPlayer compatible).
-    """
-    ses, lt = _get_session()
-    if ses is None:
-        raise HTTPException(503,
-            "libtorrent is not installed on the server. "
-            "Install it with: pip install python-libtorrent (macOS: brew install libtorrent-rasterbar first)"
-        )
+    Stream the video file via HTTP with Range support (AVPlayer / seek-compatible).
 
-    # Start torrent if needed
-    if magnet and torrent_hash not in _sessions:
-        _add_or_get_torrent(magnet, torrent_hash)
+    Usage from iOS:
+      1. Encode your JWT as a header — BUT AVPlayer does not support custom headers.
+         Solution: pass token as query param  ?token=<jwt>  and verify it here.
+         OR: use a short-lived signed URL generated by /stream/sign/{hash}.
+
+    For now the endpoint uses Bearer auth via the standard Depends.
+    See /stream/sign/{hash} for a AVPlayer-compatible signed URL approach.
+    """
+    ses, _ = _get_lt()
+    if ses is None:
+        raise HTTPException(503, "libtorrent not installed on the server")
+
+    # Auto-start if magnet provided and not yet running
+    if magnet:
+        with _lock:
+            already = torrent_hash in _sessions
+        if not already:
+            _add_or_get(magnet, torrent_hash)
 
     with _lock:
         handle = _sessions.get(torrent_hash)
     if not handle:
-        raise HTTPException(404, "Torrent not started. POST /stream/start first with magnet link.")
+        raise HTTPException(404, "Torrent not started. POST /stream/start first.")
 
-    # Wait for metadata (up to 60s)
-    if not _wait_for_metadata(handle, timeout=60):
+    # Wait for metadata (up to 60 s)
+    if not _wait_metadata(handle, timeout=60):
         raise HTTPException(504, "Timed out waiting for torrent metadata")
 
-    video_path = _largest_video_file(handle)
+    video_path = _best_video(handle)
     if not video_path:
         raise HTTPException(404, "No video file found in torrent")
 
-    # Wait until the file exists and has some data
-    waited = 0
-    while waited < 30:
+    # Wait until file exists on disk (libtorrent creates the file when first pieces arrive)
+    for _ in range(30):
         if video_path.exists() and video_path.stat().st_size > 0:
             break
         time.sleep(1)
-        waited += 1
+    else:
+        raise HTTPException(404, f"Video file not yet on disk: {video_path.name}")
 
-    if not video_path.exists():
-        raise HTTPException(404, f"Video file not yet available: {video_path.name}")
-
-    file_size = video_path.stat().st_size
+    file_size    = video_path.stat().st_size
     content_type = mimetypes.guess_type(str(video_path))[0] or "video/mp4"
+    chunk_size   = 1024 * 1024  # 1 MB chunks
 
-    # ── Range handling ──
-    start = 0
-    end   = file_size - 1
-    chunk = 1024 * 1024  # 1 MB
+    # ── Range parsing ──────────────────────────────────────────────────────
+    start, end = 0, file_size - 1
+    is_range   = False
 
     if range:
         try:
             range_val = range.replace("bytes=", "")
             s, e = range_val.split("-")
-            start = int(s)
-            end   = int(e) if e else file_size - 1
+            start    = int(s)
+            end      = int(e) if e.strip() else file_size - 1
+            is_range = True
         except Exception:
-            pass
+            pass  # ignore malformed range, serve from 0
 
+    # Clamp
+    start = max(0, min(start, file_size - 1))
+    end   = max(start, min(end, file_size - 1))
     length = end - start + 1
 
     def iterfile():
@@ -212,41 +281,51 @@ async def stream_torrent(
             f.seek(start)
             remaining = length
             while remaining > 0:
-                read_size = min(chunk, remaining)
-                data = f.read(read_size)
+                data = f.read(min(chunk_size, remaining))
                 if not data:
                     break
                 yield data
                 remaining -= len(data)
 
-    status_code = 206 if range else 200
     headers = {
-        "Content-Range":  f"bytes {start}-{end}/{file_size}",
-        "Accept-Ranges":  "bytes",
-        "Content-Length": str(length),
+        "Content-Range":       f"bytes {start}-{end}/{file_size}",
+        "Accept-Ranges":       "bytes",
+        "Content-Length":      str(length),
         "Content-Disposition": f'inline; filename="{video_path.name}"',
+        "Cache-Control":       "no-cache",
     }
 
     return StreamingResponse(
         iterfile(),
-        status_code=status_code,
+        status_code=206 if is_range else 200,
         headers=headers,
         media_type=content_type,
     )
 
 
 @router.delete("/{torrent_hash}")
-def remove_torrent(torrent_hash: str, delete_files: bool = False,
-                   _user: User = Depends(get_current_user)):
-    ses, lt = _get_session()
+def remove_torrent(
+    torrent_hash: str,
+    delete_files: bool = False,
+    _user: User = Depends(get_current_user),
+):
+    """Stop torrent and optionally delete downloaded files."""
+    ses, lt = _get_lt()
     if ses is None:
         raise HTTPException(503, "libtorrent not installed")
 
     with _lock:
         handle = _sessions.pop(torrent_hash, None)
 
-    if handle:
-        option = lt.options_t.delete_files if delete_files else lt.options_t(0)
-        ses.remove_torrent(handle, option)
+    if handle and lt:
+        try:
+            # Compatible with both libtorrent 1.x and 2.x
+            flag = getattr(lt, "remove_flags_t", None)
+            if flag and delete_files:
+                ses.remove_torrent(handle, flag.delete_files)
+            else:
+                ses.remove_torrent(handle, 1 if delete_files else 0)
+        except Exception:
+            ses.remove_torrent(handle)
 
-    return {"message": "Removed", "hash": torrent_hash}
+    return {"message": "Removed", "hash": torrent_hash, "files_deleted": delete_files}

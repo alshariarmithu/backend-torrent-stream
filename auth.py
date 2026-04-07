@@ -1,18 +1,20 @@
-
+"""
+JWT Authentication
+"""
 from fastapi import APIRouter, HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 from passlib.context import CryptContext
 from jose import jwt, JWTError
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel
 from datetime import datetime, timedelta
 import os
 
 from database import get_db, User
 
 # ─── Config ──────────────────────────────────────────────────────────────────
-SECRET_KEY  = os.getenv("JWT_SECRET", "change-me-in-production-use-random-256bit")
-ALGORITHM   = "HS256"
+SECRET_KEY        = os.getenv("JWT_SECRET", "change-me-in-production-use-random-256bit")
+ALGORITHM         = "HS256"
 TOKEN_EXPIRE_DAYS = 30
 
 pwd_ctx  = CryptContext(schemes=["bcrypt"], deprecated="auto")
