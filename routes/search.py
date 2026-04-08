@@ -132,12 +132,19 @@
 # async def top_tv(_user: User = Depends(get_current_user)):
 #     data = await fetch(f"{APIBAY_BASE}/precompiled/data_top100_208.json")
 #     return wrap([fmt(item) for item in data])
+import asyncio
+import json
+import os
 from time import perf_counter
 from typing import Optional
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
+try:
+    from playwright.sync_api import sync_playwright
+except ImportError:
+    sync_playwright = None
 
 from auth import get_current_user
 from models import User
@@ -154,6 +161,8 @@ TRACKERS = [
 ]
 
 APIBAY_BASE = "https://apibay.org"
+PLAYWRIGHT_HEADLESS = os.getenv("PLAYWRIGHT_HEADLESS", "true").lower() not in {"0", "false", "no"}
+PLAYWRIGHT_ENABLED = os.getenv("SEARCH_USE_PLAYWRIGHT", "true").lower() not in {"0", "false", "no"}
 CATEGORY_MAP = {
     "all": "0",
     "movies": "207",
@@ -197,15 +206,49 @@ def fmt(t: dict) -> dict:
     }
 
 
+def _build_url(url: str, params: dict | None = None) -> str:
+    if not params:
+        return url
+    return f"{url}?{urlencode(params)}"
+
+
+def _normalize_apibay_payload(data: object) -> list[dict]:
+    if isinstance(data, list) and len(data) == 1 and data[0].get("id") == "0":
+        return []
+    return data if isinstance(data, list) else []
+
+
+def _fetch_with_playwright(url: str, params: dict | None = None) -> list[dict]:
+    if sync_playwright is None:
+        raise RuntimeError("Playwright is not installed")
+
+    target_url = _build_url(url, params)
+    with sync_playwright() as p:
+        browser = p.chromium.launch(
+            headless=PLAYWRIGHT_HEADLESS,
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
+        )
+        try:
+            page = browser.new_page()
+            page.goto(target_url, wait_until="domcontentloaded", timeout=20_000)
+            raw = page.locator("body").inner_text()
+            return _normalize_apibay_payload(json.loads(raw))
+        finally:
+            browser.close()
+
+
 async def fetch(url: str, params: dict | None = None) -> list[dict]:
+    if PLAYWRIGHT_ENABLED:
+        try:
+            return await asyncio.to_thread(_fetch_with_playwright, url, params)
+        except Exception:
+            pass
+
     try:
         async with httpx.AsyncClient(timeout=20) as client:
             response = await client.get(url, params=params)
             response.raise_for_status()
-            data = response.json()
-            if isinstance(data, list) and len(data) == 1 and data[0].get("id") == "0":
-                return []
-            return data if isinstance(data, list) else []
+            return _normalize_apibay_payload(response.json())
     except httpx.HTTPStatusError as exc:
         raise HTTPException(
             status_code=exc.response.status_code,
@@ -238,31 +281,7 @@ async def search(
     data = await fetch(f"{APIBAY_BASE}/q.php", {"q": query, "cat": cat_code})
     result = wrap([fmt(item) for item in data])
     result["time"] = round(perf_counter() - started, 3)
-
-    return {
-            "data": [
-                {
-                    "name": f"Demo result for: {query}",
-                    "size": "1073741824",
-                    "seeders": "123",
-                    "leechers": "7",
-                    "magnet": "magnet:?xt=urn:btih:DEMOHASH1234567890ABCDEF1234567890ABCDEF",
-                    "hash": "DEMOHASH1234567890ABCDEF1234567890ABCDEF",
-                    "poster": "",
-                    "category": CATEGORY_MAP.get(category.lower(), "0"),
-                    "site": "demo",
-                    "url": "",
-                    "date": "1710000000",
-                    "uploader": "demo-user",
-                    "screenshot": [],
-                    "files": [],
-                }
-            ],
-            "current_page": 1,
-            "total_pages": 1,
-            "total": 1,
-            "time": 0.001,
-        }
+    return result
 
 
 @router.get("/trending")
