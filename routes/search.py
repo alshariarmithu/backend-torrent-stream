@@ -238,21 +238,8 @@ async def search(
     data = await fetch(f"{APIBAY_BASE}/q.php", {"q": query, "cat": cat_code})
     result = wrap([fmt(item) for item in data])
     result["time"] = round(perf_counter() - started, 3)
-    return result
-    # Replace the existing GET "/" handler with a demo response.
-    router.routes = [
-        r for r in router.routes
-        if not (getattr(r, "path", None) == "/" and "GET" in getattr(r, "methods", set()))
-    ]
 
-
-    @router.get("/")
-    async def search_demo(
-        query: str = Query(..., min_length=1),
-        category: Optional[str] = Query("all"),
-        _user: User = Depends(get_current_user),
-    ):
-        return {
+    return {
             "data": [
                 {
                     "name": f"Demo result for: {query}",
