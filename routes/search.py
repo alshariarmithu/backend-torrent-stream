@@ -239,6 +239,43 @@ async def search(
     result = wrap([fmt(item) for item in data])
     result["time"] = round(perf_counter() - started, 3)
     return result
+    # Replace the existing GET "/" handler with a demo response.
+    router.routes = [
+        r for r in router.routes
+        if not (getattr(r, "path", None) == "/" and "GET" in getattr(r, "methods", set()))
+    ]
+
+
+    @router.get("/")
+    async def search_demo(
+        query: str = Query(..., min_length=1),
+        category: Optional[str] = Query("all"),
+        _user: User = Depends(get_current_user),
+    ):
+        return {
+            "data": [
+                {
+                    "name": f"Demo result for: {query}",
+                    "size": "1073741824",
+                    "seeders": "123",
+                    "leechers": "7",
+                    "magnet": "magnet:?xt=urn:btih:DEMOHASH1234567890ABCDEF1234567890ABCDEF",
+                    "hash": "DEMOHASH1234567890ABCDEF1234567890ABCDEF",
+                    "poster": "",
+                    "category": CATEGORY_MAP.get(category.lower(), "0"),
+                    "site": "demo",
+                    "url": "",
+                    "date": "1710000000",
+                    "uploader": "demo-user",
+                    "screenshot": [],
+                    "files": [],
+                }
+            ],
+            "current_page": 1,
+            "total_pages": 1,
+            "total": 1,
+            "time": 0.001,
+        }
 
 
 @router.get("/trending")
