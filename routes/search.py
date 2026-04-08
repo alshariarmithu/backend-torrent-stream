@@ -161,6 +161,7 @@ TRACKERS = [
 ]
 
 APIBAY_BASE = "https://apibay.org"
+DEMO_MODE = os.getenv("SEARCH_DEMO_MODE", "true").lower() not in {"0", "false", "no"}
 PLAYWRIGHT_HEADLESS = os.getenv("PLAYWRIGHT_HEADLESS", "true").lower() not in {"0", "false", "no"}
 PLAYWRIGHT_ENABLED = os.getenv("SEARCH_USE_PLAYWRIGHT", "true").lower() not in {"0", "false", "no"}
 CATEGORY_MAP = {
@@ -268,6 +269,51 @@ def wrap(items: list[dict], page: int = 1) -> dict:
     }
 
 
+def _demo_item(name: str, category_code: str, seeders: str, info_hash: str) -> dict:
+    return {
+        "name": name,
+        "size": "1073741824",
+        "seeders": seeders,
+        "leechers": "7",
+        "magnet": build_magnet(info_hash, name),
+        "hash": info_hash,
+        "poster": "",
+        "category": category_code,
+        "site": "demo",
+        "url": "",
+        "date": "1710000000",
+        "uploader": "demo-user",
+        "screenshot": [],
+        "files": [],
+    }
+
+
+def _demo_response(query: str, category: str) -> dict:
+    category_code = CATEGORY_MAP.get(category.lower(), "0")
+    return wrap(
+        [
+            _demo_item(
+                name=f"{query} Demo Release 1080p",
+                category_code=category_code,
+                seeders="123",
+                info_hash="DEMOHASH1234567890ABCDEF1234567890ABCDEF",
+            ),
+            _demo_item(
+                name=f"{query} Demo Release 4K",
+                category_code=category_code,
+                seeders="88",
+                info_hash="DEMOHASH2234567890ABCDEF1234567890ABCDEF",
+            ),
+            _demo_item(
+                name=f"{query} Demo Release BluRay",
+                category_code=category_code,
+                seeders="54",
+                info_hash="DEMOHASH3234567890ABCDEF1234567890ABCDEF",
+            ),
+        ]
+    )
+
+
 @router.get("/")
 async def search(
     query: str = Query(..., min_length=1),
@@ -277,6 +323,12 @@ async def search(
     _user: User = Depends(get_current_user),
 ):
     started = perf_counter()
+    if DEMO_MODE:
+        result = _demo_response(query, category)
+        result["time"] = round(perf_counter() - started, 3)
+        return result
+
+    # Keep the real search path available behind DEMO_MODE for quick switching.
     cat_code = CATEGORY_MAP.get(category.lower(), "0")
     data = await fetch(f"{APIBAY_BASE}/q.php", {"q": query, "cat": cat_code})
     result = wrap([fmt(item) for item in data])
@@ -289,6 +341,9 @@ async def trending(
     category: Optional[str] = Query("all"),
     _user: User = Depends(get_current_user),
 ):
+    if DEMO_MODE:
+        return _demo_response("Trending", category)
+
     cat = category.lower() if category.lower() in {
         "all", "audio", "video", "apps", "games", "porn", "other"
     } else "all"
@@ -298,17 +353,26 @@ async def trending(
 
 @router.get("/recent")
 async def recent(_user: User = Depends(get_current_user)):
+    if DEMO_MODE:
+        return _demo_response("Recent", "all")
+
     data = await fetch(f"{APIBAY_BASE}/precompiled/data_top100_recent.json")
     return wrap([fmt(item) for item in data])
 
 
 @router.get("/top/movies")
 async def top_movies(_user: User = Depends(get_current_user)):
+    if DEMO_MODE:
+        return _demo_response("Top Movies", "movies")
+
     data = await fetch(f"{APIBAY_BASE}/precompiled/data_top100_207.json")
     return wrap([fmt(item) for item in data])
 
 
 @router.get("/top/tv")
 async def top_tv(_user: User = Depends(get_current_user)):
+    if DEMO_MODE:
+        return _demo_response("Top TV", "tv")
+
     data = await fetch(f"{APIBAY_BASE}/precompiled/data_top100_208.json")
     return wrap([fmt(item) for item in data])
