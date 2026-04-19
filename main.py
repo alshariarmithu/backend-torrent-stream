@@ -1,10 +1,10 @@
 from dotenv import load_dotenv
-
+import os
 load_dotenv()
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 
 from auth import router as auth_router
 from db import lifespan_context
@@ -51,4 +51,4 @@ async def health():
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("main:app", host="0.0.0.0", port=8081, reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=int(os.getenv("PORT", 8081)), reload=True)

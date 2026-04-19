@@ -31,6 +31,13 @@ POST {{baseUrl}}/auth/login
 GET {{baseUrl}}/auth/me
 Authorization: Bearer {{token}}
 
+
+### Search torrents
+GET {{baseUrl}}/search/?query=ubuntu&category=movies
+Authorization: Bearer {{token}}
+
+
+
 ### Refresh token
 POST {{baseUrl}}/auth/refresh
 Authorization: Bearer {{token}}

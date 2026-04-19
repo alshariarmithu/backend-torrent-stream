@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
 from passlib.context import CryptContext
+from passlib.hash import argon2
 from pydantic import BaseModel, EmailStr
 
 from models import User
@@ -14,7 +15,8 @@ SECRET_KEY = os.getenv("JWT_SECRET", "change-me-in-production-use-random-256bit"
 ALGORITHM = "HS256"
 TOKEN_EXPIRE_DAYS = int(os.getenv("TOKEN_EXPIRE_DAYS", "30"))
 
-pwd_ctx = CryptContext(schemes=["argon2"], deprecated="auto")
+PASSWORD_SCHEMES = ["argon2", "bcrypt"] if argon2.has_backend() else ["bcrypt"]
+pwd_ctx = CryptContext(schemes=PASSWORD_SCHEMES, deprecated="auto")
 security = HTTPBearer()
 router = APIRouter()
 

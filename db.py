@@ -1,6 +1,6 @@
 import os
 from contextlib import asynccontextmanager
-from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo import AsyncMongoClient
 from beanie import init_beanie
 
 from models import (
@@ -15,14 +15,15 @@ from models import (
 MONGODB_URL = os.getenv("MONGODB_URL", "mongodb://localhost:27017")
 MONGODB_DB = os.getenv("MONGODB_DB", "torrentstream")
 
-client: AsyncIOMotorClient | None = None
+client: AsyncMongoClient | None = None
 
 
 async def init_db() -> None:
     global client
-    client = AsyncIOMotorClient(MONGODB_URL)
+    client = AsyncMongoClient(MONGODB_URL)
+    db = client[MONGODB_DB]
     await init_beanie(
-        database=client[MONGODB_DB],
+        database=db,
         document_models=[
             User,
             TorrentItem,
@@ -44,5 +45,7 @@ async def close_db() -> None:
 @asynccontextmanager
 async def lifespan_context(_app):
     await init_db()
-    yield
-    await close_db()
+    try:
+        yield
+    finally:
+        await close_db()
