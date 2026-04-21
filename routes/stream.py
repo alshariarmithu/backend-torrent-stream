@@ -73,7 +73,7 @@ def _get_lt():
     Returns (session, lt_module) or raises HTTP 503.
     """
     try:
-        import libtorrent as lt
+        import libtorrent as lt  # type: ignore[import-not-found]
     except ImportError:
         return None, None
 

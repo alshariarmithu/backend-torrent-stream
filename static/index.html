@@ -5,13 +5,20 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>TorrentStream — UI</title>
   <style>
-    body { font-family: system-ui, -apple-system, Arial, sans-serif; padding: 24px; max-width:800px; margin:auto }
-    h1{font-size:1.4rem}
-    form{margin-bottom:18px}
-    input,button{padding:8px 10px;margin:6px 0;width:100%;box-sizing:border-box}
-    .row{display:flex;gap:8px}
-    .row input{flex:1}
-    pre{background:#f6f8fa;padding:12px;border-radius:6px}
+    body { font-family: system-ui, -apple-system, Arial, sans-serif; padding: 24px; max-width: 900px; margin: auto }
+    h1 { font-size: 1.4rem }
+    form { margin-bottom: 18px }
+    input, button, select { padding: 8px 10px; margin: 6px 0; width: 100%; box-sizing: border-box }
+    .row { display: flex; gap: 8px }
+    .row input { flex: 1 }
+    pre { background: #f6f8fa; padding: 12px; border-radius: 6px; overflow: auto }
+    .result-card { padding: 10px; border-bottom: 1px solid #eee }
+    .result-actions { display: flex; gap: 8px; align-items: center; margin-top: 8px }
+    .result-actions a { font-size: 0.9rem }
+    .result-actions button { width: auto; margin: 0 }
+    .muted { color: #666; font-size: 0.92rem }
+    #streamVideo { width: 100%; max-height: 460px; background: #000; border-radius: 10px; margin-top: 8px }
+    #playerMeta { margin-top: 8px; font-size: 0.92rem }
   </style>
 </head>
 <body>
@@ -66,12 +73,21 @@
   </section>
 
   <section>
+    <h2>Stream Player Test</h2>
+    <p class="muted">Click <strong>Prepare &amp; Play</strong> on a search result. Server will load torrent metadata, pick best video, scan subtitles, and return a stream link.</p>
+    <video id="streamVideo" controls playsinline></video>
+    <div id="playerMeta" class="muted">No stream loaded yet.</div>
+  </section>
+
+  <section>
     <h2>Response</h2>
     <pre id="out">No requests yet.</pre>
   </section>
 
   <script>
     const out = document.getElementById('out');
+    const streamVideo = document.getElementById('streamVideo');
+    const playerMeta = document.getElementById('playerMeta');
 
     function getStoredToken(){
       return localStorage.getItem('ts_token') || '';
@@ -118,6 +134,52 @@
       try{ return JSON.parse(text) }catch(e){ return text }
     }
 
+    function escapeHtml(value){
+      return String(value ?? '')
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#39;');
+    }
+
+    function buildPlaybackUrl(payload){
+      const raw = payload.stream_url || payload.stream_path;
+      const abs = new URL(raw, window.location.origin);
+      const token = getStoredToken();
+      if(token){
+        abs.searchParams.set('token', token);
+      }
+      return abs.toString();
+    }
+
+    async function prepareAndPlay(hash, magnet, name){
+      const token = getStoredToken();
+      if(!token){
+        alert('Login first or paste a token.');
+        return;
+      }
+
+      playerMeta.textContent = `Preparing stream for: ${name}`;
+      const path = `/stream/magnet/${encodeURIComponent(hash)}?magnet=${encodeURIComponent(magnet)}`;
+      const response = await getJson(path, true);
+      out.textContent = JSON.stringify(response, null, 2);
+
+      if(response && response.detail){
+        playerMeta.textContent = `Prepare failed: ${typeof response.detail === 'string' ? response.detail : JSON.stringify(response.detail)}`;
+        return;
+      }
+
+      const playbackUrl = buildPlaybackUrl(response);
+      streamVideo.src = playbackUrl;
+      streamVideo.load();
+      try { await streamVideo.play(); } catch (_) {}
+
+      const selectedVideo = response.selected_video?.name || '(unknown)';
+      const subtitleCount = Array.isArray(response.subtitle_tracks) ? response.subtitle_tracks.length : 0;
+      playerMeta.textContent = `Now playing: ${selectedVideo} | Subtitles: ${subtitleCount} | URL: ${playbackUrl}`;
+    }
+
     // register
     document.getElementById('registerForm').addEventListener('submit', async e =>{
       e.preventDefault();
@@ -150,7 +212,16 @@
       const container = document.getElementById('results');
       if(!data || !data.data) { container.innerHTML = '<p>No results</p>'; return; }
       const items = data.data;
-      container.innerHTML = items.map(i => `\n        <div style="padding:8px;border-bottom:1px solid #eee">\n          <strong>${i.name}</strong><br/>\n          Size: ${i.size} • Seeders: ${i.seeders} • Leechers: ${i.leechers}<br/>\n          <a href="${i.magnet}">Magnet Link</a>\n        </div>`).join('');
+      container.innerHTML = items.map((i, idx) => `\n        <div class="result-card">\n          <strong>${escapeHtml(i.name)}</strong><br/>\n          Size: ${escapeHtml(i.size)} • Seeders: ${escapeHtml(i.seeders)} • Leechers: ${escapeHtml(i.leechers)}\n          <div class="result-actions">\n            <a href="${escapeHtml(i.magnet)}" target="_blank" rel="noopener">Magnet Link</a>\n            <button type="button" class="playBtn" data-idx="${idx}">Prepare &amp; Play</button>\n          </div>\n        </div>`).join('');
+
+      container.querySelectorAll('.playBtn').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          const idx = Number(btn.dataset.idx);
+          const item = items[idx];
+          if(!item) return;
+          await prepareAndPlay(item.hash, item.magnet, item.name);
+        });
+      });
     }
 
     document.getElementById('searchForm').addEventListener('submit', async e =>{
