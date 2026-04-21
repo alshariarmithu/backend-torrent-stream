@@ -8,6 +8,7 @@ WORKDIR /app
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
+        ffmpeg \
         python3-libtorrent \
     && rm -rf /var/lib/apt/lists/*
 

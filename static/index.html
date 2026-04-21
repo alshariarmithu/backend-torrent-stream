@@ -7,66 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet">
-  <script>
-    async function prepareAndPlay(hash, magnet, name) {
-      const token = getStoredToken();
-      if (!token) {
-        alert('Login first or paste a token.');
-        return;
-      }
-
-      resetPlayer();
-      playerMeta.textContent = `Preparing HTTP stream for: ${name}`;
-      setConnection('HTTP prep', 'warning');
-      setStage('Preparing', 'warning');
-      resultsMeta.textContent = `Preparing ${name}…`;
-
-      try {
-        const path = `/stream/magnet/${encodeURIComponent(hash)}?magnet=${encodeURIComponent(magnet)}`;
-        const response = await getJson(path, true);
-        out.textContent = JSON.stringify(response, null, 2);
-
-        if (!response || !response.stream_url) {
-          throw new Error(response?.message || 'Missing stream URL');
-        }
-
-        const selectedMedia = response.selected_media?.name || response.selected_video?.name || '(unknown)';
-        const subtitleCount = Array.isArray(response.subtitle_tracks) ? response.subtitle_tracks.length : 0;
-        const contentType = response.content_type || response.selected_media?.content_type || response.selected_video?.content_type || mimeFromMediaName(selectedMedia);
-        const playbackUrl = new URL(response.stream_url, window.location.origin);
-        playbackUrl.searchParams.set('token', token);
-
-        currentSelectedMedia = selectedMedia;
-        currentContentType = contentType;
-        updateProgress(response.prepared ? 100 : 0);
-
-        if (!browserCanPlayMedia(selectedMedia, contentType)) {
-          setConnection('Browser limited', 'warning');
-          setStage('Unsupported', 'warning');
-          playerMeta.textContent = `Selected file ${selectedMedia}${contentType ? ` (${contentType})` : ''} may need a different browser or codec. Trying playback now...`;
-          resultsMeta.textContent = `Prepared ${selectedMedia}. Browser support may vary by codec.`;
-          return;
-        }
-
-        setConnection(response.prepared ? 'Streaming' : 'Warming up', response.prepared ? 'success' : 'warning');
-        setStage(response.prepared ? 'Ready' : 'Preparing', response.prepared ? 'success' : 'warning');
-        playerMeta.textContent = response.prepared
-          ? `Now playing: ${selectedMedia} | Subtitles: ${subtitleCount}`
-          : `HTTP stream URL ready for ${selectedMedia}. The torrent is still warming up.`;
-
-        streamVideo.src = playbackUrl.toString();
-        streamVideo.load();
-        try { await streamVideo.play(); } catch (_) {}
-        resultsMeta.textContent = `Streaming ${selectedMedia} over HTTP`;
-      } catch (error) {
-        setConnection('Error', 'danger');
-        setStage('Failed', 'danger');
-        const message = error instanceof Error ? error.message : String(error || 'Unknown error');
-        playerMeta.textContent = `Prepare failed: ${message}`;
-        resultsMeta.textContent = 'HTTP stream preparation failed.';
-      }
-    }
-  </script>
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1"></script>
   <style>
     :root {
       color-scheme: dark;
@@ -793,7 +734,7 @@
     </main>
 
     <footer class="footer">
-      <span>HTTP range playback</span>
+      <span>HLS-first playback</span>
       <span>Open the backend UI, search a title, then hit Prepare &amp; Play.</span>
     </footer>
   </div>
@@ -811,8 +752,10 @@
     const resultsMeta = document.getElementById('resultsMeta');
     let currentSelectedMedia = '';
     let currentContentType = '';
+    let currentPlaybackMode = '';
     let streamSocket = null;
     let streamReady = false;
+    let hlsPlayer = null;
     const clientLogPrefix = '[TorrentStream UI]';
 
     function logClient(message, details) {
@@ -988,13 +931,157 @@
       }
     }
 
+    function destroyHlsPlayer() {
+      if (!hlsPlayer) return;
+      try {
+        hlsPlayer.destroy();
+      } catch (_) {
+        // ignore
+      }
+      hlsPlayer = null;
+    }
+
+    function browserCanPlayNativeHls() {
+      return streamVideo.canPlayType('application/vnd.apple.mpegurl') !== '';
+    }
+
+    function browserCanUseHlsJs() {
+      return Boolean(window.Hls && window.Hls.isSupported && window.Hls.isSupported());
+    }
+
     function browserCanPlayMedia(mediaName, contentType) {
       const mime = contentType || mimeFromMediaName(mediaName);
-      if (!mime) return true;
-      if (mime.startsWith('audio/') || mime.startsWith('video/')) {
-        return true;
-      }
+      if (!mime) return false;
       return streamVideo.canPlayType(mime) !== '';
+    }
+
+    function clearMediaSource() {
+      destroyHlsPlayer();
+      streamVideo.pause();
+      streamVideo.removeAttribute('src');
+      streamVideo.load();
+    }
+
+    function playWithNativeHls(url) {
+      return new Promise((resolve, reject) => {
+        const onCanPlay = () => {
+          streamVideo.removeEventListener('error', onError);
+          void streamVideo.play().catch(() => {});
+          resolve('native-hls');
+        };
+        const onError = () => {
+          streamVideo.removeEventListener('canplay', onCanPlay);
+          reject(new Error('Native HLS playback failed'));
+        };
+
+        clearMediaSource();
+        streamVideo.addEventListener('canplay', onCanPlay, { once: true });
+        streamVideo.addEventListener('error', onError, { once: true });
+        streamVideo.src = url;
+        streamVideo.load();
+      });
+    }
+
+    function playWithHlsJs(url) {
+      return new Promise((resolve, reject) => {
+        if (!browserCanUseHlsJs()) {
+          reject(new Error('hls.js is not supported in this browser'));
+          return;
+        }
+
+        clearMediaSource();
+        const hls = new Hls({
+          enableWorker: true,
+          backBufferLength: 90,
+        });
+        hlsPlayer = hls;
+        let recoverAttempts = 0;
+
+        let settled = false;
+        const finish = mode => {
+          if (settled) return;
+          settled = true;
+          resolve(mode);
+        };
+        const fail = message => {
+          if (settled) return;
+          settled = true;
+          reject(new Error(message));
+        };
+
+        hls.on(Hls.Events.MANIFEST_PARSED, () => {
+          void streamVideo.play().catch(() => {});
+          finish('hls.js');
+        });
+
+        hls.on(Hls.Events.FRAG_BUFFERED, () => {
+          recoverAttempts = 0;
+        });
+
+        hls.on(Hls.Events.ERROR, (_, data) => {
+          logClient('hls error', data);
+          if (!data?.fatal) return;
+
+          switch (data.type) {
+            case Hls.ErrorTypes.NETWORK_ERROR:
+              if (recoverAttempts < 2) {
+                recoverAttempts += 1;
+                hls.startLoad();
+                return;
+              }
+              fail('HLS network error');
+              return;
+            case Hls.ErrorTypes.MEDIA_ERROR:
+              if (recoverAttempts < 2) {
+                recoverAttempts += 1;
+                hls.recoverMediaError();
+                return;
+              }
+              fail('HLS media error');
+              return;
+            default:
+              hls.destroy();
+              hlsPlayer = null;
+              fail(data.details || 'Fatal HLS error');
+          }
+        });
+
+        hls.loadSource(url);
+        hls.attachMedia(streamVideo);
+      });
+    }
+
+    async function playSelectedMedia({ hlsUrl, streamUrl, selectedMedia, contentType, mediaKind }) {
+      currentSelectedMedia = selectedMedia || '';
+      currentContentType = contentType || '';
+
+      if (mediaKind === 'video' && hlsUrl) {
+        if (browserCanPlayNativeHls()) {
+          await playWithNativeHls(hlsUrl);
+          currentPlaybackMode = 'native-hls';
+          return;
+        }
+
+        if (browserCanUseHlsJs()) {
+          await playWithHlsJs(hlsUrl);
+          currentPlaybackMode = 'hls.js';
+          return;
+        }
+      }
+
+      if (!streamUrl) {
+        throw new Error('No playable stream URL was returned');
+      }
+
+      if (mediaKind === 'video' && !browserCanPlayMedia(selectedMedia, contentType)) {
+        throw new Error(`Selected file ${selectedMedia}${contentType ? ` (${contentType})` : ''} is not playable in this browser and HLS is unavailable`);
+      }
+
+      clearMediaSource();
+      streamVideo.src = streamUrl;
+      streamVideo.load();
+      void streamVideo.play().catch(() => {});
+      currentPlaybackMode = 'direct';
     }
 
     function buildWsUrl(hash, token) {
@@ -1018,12 +1105,11 @@
     function resetPlayer() {
       currentSelectedMedia = '';
       currentContentType = '';
+      currentPlaybackMode = '';
       streamReady = false;
       closeStreamSocket();
       logClient('player reset');
-      streamVideo.pause();
-      streamVideo.removeAttribute('src');
-      streamVideo.load();
+      clearMediaSource();
       playerMeta.textContent = 'No stream loaded yet.';
       updateProgress(0);
       setConnection('Idle', 'accent');
@@ -1044,8 +1130,8 @@
       });
 
       resetPlayer();
-      playerMeta.textContent = `Preparing HTTP stream for: ${name}`;
-      setConnection('HTTP prep', 'warning');
+      playerMeta.textContent = `Preparing HLS stream for: ${name}`;
+      setConnection('HLS prep', 'warning');
       setStage('Preparing', 'warning');
       resultsMeta.textContent = `Preparing ${name}…`;
 
@@ -1088,11 +1174,14 @@
           const readyBytes = Number(message.ready_bytes || 0);
           const pct = readyBytes > 0 ? Math.min(100, Math.round((fileBytes / readyBytes) * 100)) : Math.round((message.progress || 0) * 100);
           updateProgress(pct);
-          setConnection(`Bytes ${fileBytes}/${readyBytes || '?'}`, fileBytes >= readyBytes ? 'success' : 'warning');
-          setStage(message.file_ready ? 'Buffering done' : 'Buffering', message.file_ready ? 'success' : 'warning');
-          playerMeta.textContent = message.file_ready
-            ? 'First chunk ready. Starting playback…'
-            : `Waiting for first chunk… ${pct}% | peers: ${message.num_peers || 0}`;
+          const modeLabel = message.playback_mode === 'hls' ? 'HLS' : 'Direct';
+          setConnection(`${modeLabel} ${fileBytes}/${readyBytes || '?'}`, fileBytes >= readyBytes ? 'success' : 'warning');
+          setStage(message.file_ready ? 'Transcoding' : 'Buffering', message.file_ready ? 'success' : 'warning');
+          playerMeta.textContent = message.message || (
+            message.file_ready
+              ? `Initial torrent buffer is ready. Finalizing ${modeLabel} playback…`
+              : `Waiting for ${modeLabel} buffer… ${pct}% | peers: ${message.num_peers || 0}`
+          );
           return;
         }
 
@@ -1102,6 +1191,7 @@
           const contentType = message.content_type || message.selected_media?.content_type || message.selected_video?.content_type || mimeFromMediaName(selectedMedia);
           const mediaKind = message.selected_media?.kind || message.selected_video?.kind || (contentType.startsWith('audio/') ? 'audio' : 'video');
           const streamUrl = message.stream_url;
+          const hlsUrl = message.hls_url;
 
           currentSelectedMedia = selectedMedia;
           currentContentType = contentType;
@@ -1110,33 +1200,30 @@
             mediaKind,
             contentType,
             streamUrl,
+            hlsUrl,
           });
 
-          if (!browserCanPlayMedia(selectedMedia, contentType)) {
-            setConnection('Browser limited', 'warning');
-            setStage('Unsupported', 'warning');
-            playerMeta.textContent = `Selected file ${selectedMedia}${contentType ? ` (${contentType})` : ''} may need a different browser or codec. Trying playback now...`;
-            resultsMeta.textContent = `Prepared ${selectedMedia}. Browser support may vary by codec.`;
-            closeStreamSocket();
-            return;
-          }
-
-          streamVideo.src = streamUrl;
-          streamVideo.load();
-          void streamVideo.play()
-            .then(() => {
-              logClient('video play requested');
-            })
-            .catch(error => {
-              logClient('video play rejected', {
-                message: error instanceof Error ? error.message : String(error),
-              });
+          playSelectedMedia({
+            hlsUrl,
+            streamUrl,
+            selectedMedia,
+            contentType,
+            mediaKind,
+          }).then(() => {
+            setConnection(currentPlaybackMode === 'direct' ? 'Direct stream' : 'HLS stream', 'success');
+            setStage('Ready', 'success');
+            playerMeta.textContent = `Now playing: ${selectedMedia}`;
+            resultsMeta.textContent = `Streaming ${selectedMedia} via ${currentPlaybackMode || 'player'}`;
+          }).catch(error => {
+            logClient('playback selection failed', {
+              message: error instanceof Error ? error.message : String(error),
             });
+            setConnection('Playback error', 'danger');
+            setStage('Failed', 'danger');
+            playerMeta.textContent = `Playback failed: ${error instanceof Error ? error.message : String(error)}`;
+            resultsMeta.textContent = 'Player could not start the returned stream.';
+          });
 
-          setConnection('Streaming', 'success');
-          setStage('Ready', 'success');
-          playerMeta.textContent = `Now playing: ${selectedMedia}`;
-          resultsMeta.textContent = `Streaming ${selectedMedia} over HTTP`;
           closeStreamSocket();
           return;
         }
@@ -1313,7 +1400,9 @@
         src: streamVideo.currentSrc || '',
         readyState: streamVideo.readyState,
       });
-      playerMeta.textContent = 'Player buffering... waiting for torrent pieces.';
+      playerMeta.textContent = currentPlaybackMode && currentPlaybackMode !== 'direct'
+        ? 'Player buffering... waiting for the next HLS segment.'
+        : 'Player buffering... waiting for torrent pieces.';
       setStage('Buffering', 'warning');
     });
 
@@ -1323,9 +1412,11 @@
         currentTime: Math.round(streamVideo.currentTime * 1000) / 1000,
       });
       if (streamVideo.currentSrc) {
-        playerMeta.textContent = `Playing stream: ${streamVideo.currentSrc}`;
+        playerMeta.textContent = currentPlaybackMode && currentPlaybackMode !== 'direct'
+          ? `Playing HLS stream: ${streamVideo.currentSrc}`
+          : `Playing stream: ${streamVideo.currentSrc}`;
         setStage('Playing', 'success');
-        setConnection('Streaming', 'success');
+        setConnection(currentPlaybackMode === 'direct' ? 'Direct stream' : 'HLS stream', 'success');
       }
     });
 
@@ -1348,9 +1439,11 @@
         message: codeMap[mediaError.code] || String(mediaError.code),
         src: streamVideo.currentSrc || '',
       });
-      const sourceHint = currentSelectedMedia
-        ? ` Selected file ${currentSelectedMedia}${currentContentType ? ` (${currentContentType})` : ''} is not playable in this browser.`
-        : ' Try an MP4/MOV/WEBM/MP3/M4A/MKV source with active seeders.';
+      const sourceHint = currentPlaybackMode && currentPlaybackMode !== 'direct'
+        ? ' HLS playback failed after the stream started.'
+        : currentSelectedMedia
+          ? ` Selected file ${currentSelectedMedia}${currentContentType ? ` (${currentContentType})` : ''} is not playable in this browser.`
+          : ' Try an MP4/MOV/WEBM/MP3/M4A/MKV source with active seeders.';
       playerMeta.textContent = `Playback failed: ${codeMap[mediaError.code] || mediaError.code}.${sourceHint}`;
       setStage('Media error', 'danger');
     });
