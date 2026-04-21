@@ -299,6 +299,7 @@
 
     .input,
     .select,
+    .textarea,
     .btn {
       width: 100%;
       border: 0;
@@ -309,17 +310,25 @@
     }
 
     .input,
-    .select {
+    .select,
+    .textarea {
       padding: 13px 14px;
       color: var(--text);
       background: rgba(2, 6, 23, 0.58);
       border: 1px solid rgba(148, 163, 184, 0.16);
     }
 
-    .input::placeholder { color: #64748b; }
+    .textarea {
+      min-height: 110px;
+      resize: vertical;
+    }
+
+    .input::placeholder,
+    .textarea::placeholder { color: #64748b; }
 
     .input:focus,
-    .select:focus {
+    .select:focus,
+    .textarea:focus {
       border-color: rgba(56, 189, 248, 0.55);
       box-shadow: 0 0 0 4px rgba(56, 189, 248, 0.12);
     }
@@ -534,6 +543,77 @@
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
     }
 
+    .community-grid,
+    .community-feed,
+    .community-comments {
+      display: grid;
+      gap: 14px;
+    }
+
+    .community-card,
+    .community-comment {
+      padding: 16px;
+      border-radius: 18px;
+      background: rgba(15, 23, 42, 0.82);
+      border: 1px solid rgba(148, 163, 184, 0.14);
+    }
+
+    .community-card h3,
+    .community-comment strong {
+      margin: 0;
+      font-size: 1rem;
+      letter-spacing: -0.02em;
+    }
+
+    .community-topline,
+    .community-actions,
+    .community-inline {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: center;
+    }
+
+    .community-topline {
+      justify-content: space-between;
+      margin-bottom: 10px;
+    }
+
+    .community-actions {
+      margin-top: 14px;
+    }
+
+    .community-inline {
+      margin-top: 10px;
+    }
+
+    .community-caption,
+    .community-comment p {
+      margin: 10px 0 0;
+      color: #d8e6fb;
+      line-height: 1.65;
+    }
+
+    .community-muted {
+      color: var(--muted);
+      font-size: 0.88rem;
+    }
+
+    .community-selected {
+      padding: 14px;
+      border-radius: 16px;
+      background: rgba(14, 165, 233, 0.08);
+      border: 1px solid rgba(56, 189, 248, 0.16);
+    }
+
+    .community-empty {
+      padding: 14px;
+      border-radius: 16px;
+      color: var(--muted);
+      background: rgba(2, 6, 23, 0.42);
+      border: 1px dashed rgba(148, 163, 184, 0.16);
+    }
+
     .footer {
       margin-top: 20px;
       padding: 10px 2px 0;
@@ -696,6 +776,42 @@
 
           <div id="results" class="results-grid" aria-live="polite"></div>
         </article>
+
+        <article class="panel" id="communityCard">
+          <div class="panel-head">
+            <div>
+              <h2>Community forum</h2>
+              <p>Post torrents from search results, add tags, vote, and reply without touching the rest of the console.</p>
+            </div>
+            <button class="btn btn--ghost btn--small" type="button" id="reloadCommunity">Reload</button>
+          </div>
+
+          <div class="community-grid">
+            <div class="community-selected" id="communitySelectedTorrent">
+              Choose a torrent from search results to create a post.
+            </div>
+
+            <div class="form-grid">
+              <textarea class="textarea" id="communityCaption" placeholder="Write a short caption or review"></textarea>
+              <input class="input" id="communityTags" type="text" placeholder="Tags, comma separated: thriller, classic, sci-fi" />
+              <div class="button-row">
+                <button class="btn" type="button" id="createCommunityPost">Post to community</button>
+                <button class="btn btn--ghost" type="button" id="clearCommunityComposer">Clear</button>
+              </div>
+            </div>
+
+            <div class="field-row field-row--compact">
+              <input class="input" id="communityTagFilter" type="text" placeholder="Filter posts by tag" />
+              <div class="button-row" style="margin-top: 0;">
+                <button class="btn btn--small" type="button" id="applyCommunityFilter">Apply</button>
+                <button class="btn btn--ghost btn--small" type="button" id="clearCommunityFilter">All posts</button>
+              </div>
+            </div>
+
+            <div id="communityMeta" class="results-meta">Sign in to load community posts.</div>
+            <div id="communityPosts" class="community-feed" aria-live="polite"></div>
+          </div>
+        </article>
       </section>
 
       <aside class="stack">
@@ -750,6 +866,12 @@
     const stageChip = document.getElementById('stageChip');
     const authState = document.getElementById('authState');
     const resultsMeta = document.getElementById('resultsMeta');
+    const communityMeta = document.getElementById('communityMeta');
+    const communityPosts = document.getElementById('communityPosts');
+    const communityCaption = document.getElementById('communityCaption');
+    const communityTags = document.getElementById('communityTags');
+    const communityTagFilter = document.getElementById('communityTagFilter');
+    const communitySelectedTorrent = document.getElementById('communitySelectedTorrent');
     let currentSelectedMedia = '';
     let currentContentType = '';
     let currentPlaybackMode = '';
@@ -760,6 +882,8 @@
     let streamSocket = null;
     let streamReady = false;
     let hlsPlayer = null;
+    let selectedCommunityTorrent = null;
+    let activeCommunityTag = '';
     const clientLogPrefix = '[TorrentStream UI]';
 
     function logClient(message, details) {
@@ -841,6 +965,9 @@
         localStorage.removeItem('ts_token');
       }
       renderToken();
+      if (t) {
+        void loadCommunityPosts(activeCommunityTag);
+      }
     }
 
     function renderToken() {
@@ -850,32 +977,41 @@
       tokenSummary.textContent = token ? `Token active · ${token.slice(0, 10)}…` : 'No token';
       tokenSummary.dataset.tone = token ? 'success' : 'warning';
       setAuth(token ? 'Authenticated' : 'Unauthenticated', token ? 'success' : 'warning');
+      if (!token) {
+        communityMeta.textContent = 'Sign in to load community posts.';
+        communityPosts.innerHTML = '<div class="community-empty">Authentication is required for community actions.</div>';
+      }
     }
 
-    async function postJson(path, body, includeAuth = false) {
+    async function requestJson(path, { method = 'GET', body, includeAuth = false } = {}) {
       const headers = { 'Content-Type': 'application/json' };
       if (includeAuth) {
         const token = getStoredToken();
         if (token) headers.Authorization = 'Bearer ' + token;
       }
       const res = await fetch(path, {
-        method: 'POST',
+        method,
         headers,
-        body: JSON.stringify(body),
+        body: body === undefined ? undefined : JSON.stringify(body),
       });
       const text = await res.text();
-      try { return JSON.parse(text); } catch (e) { return text; }
+      let data;
+      try {
+        data = JSON.parse(text);
+      } catch (e) {
+        data = text;
+      }
+      return { ok: res.ok, status: res.status, data };
+    }
+
+    async function postJson(path, body, includeAuth = false) {
+      const response = await requestJson(path, { method: 'POST', body, includeAuth });
+      return response.data;
     }
 
     async function getJson(path, includeAuth = false) {
-      const headers = {};
-      if (includeAuth) {
-        const token = getStoredToken();
-        if (token) headers.Authorization = 'Bearer ' + token;
-      }
-      const res = await fetch(path, { headers });
-      const text = await res.text();
-      try { return JSON.parse(text); } catch (e) { return text; }
+      const response = await requestJson(path, { includeAuth });
+      return response.data;
     }
 
     function escapeHtml(value) {
@@ -885,6 +1021,249 @@
         .replaceAll('>', '&gt;')
         .replaceAll('"', '&quot;')
         .replaceAll("'", '&#39;');
+    }
+
+    function formatTimestamp(value) {
+      return String(value || '').replace('T', ' ').slice(0, 16) || 'Unknown time';
+    }
+
+    function parseTags(value) {
+      return String(value || '')
+        .split(',')
+        .map(tag => tag.trim().toLowerCase().replace(/^#+/, ''))
+        .filter(Boolean)
+        .filter((tag, index, items) => items.indexOf(tag) === index)
+        .slice(0, 5);
+    }
+
+    function normalizeApiError(payload, fallback) {
+      if (!payload) return fallback;
+      if (typeof payload === 'string') return payload;
+      if (typeof payload.detail === 'string') return payload.detail;
+      return fallback;
+    }
+
+    function renderSelectedCommunityTorrent() {
+      if (!selectedCommunityTorrent) {
+        communitySelectedTorrent.textContent = 'Choose a torrent from search results to create a post.';
+        return;
+      }
+
+      communitySelectedTorrent.innerHTML = `
+        <strong>${escapeHtml(selectedCommunityTorrent.name)}</strong>
+        <div class="community-inline">
+          <span class="chip" data-tone="accent">${escapeHtml(selectedCommunityTorrent.category || 'torrent')}</span>
+          <span class="chip">${escapeHtml(selectedCommunityTorrent.size || 'Unknown size')}</span>
+          <span class="chip" data-tone="success">Ready to post</span>
+        </div>
+      `;
+    }
+
+    function communityPostPayload(item) {
+      return {
+        name: item.name || '',
+        size: item.size || '',
+        seeders: item.seeders || '0',
+        leechers: item.leechers || '0',
+        magnet: item.magnet || '',
+        hash: item.hash || '',
+        poster: item.poster || '',
+        category: item.category || '',
+        site: item.site || '',
+        url: item.url || '',
+      };
+    }
+
+    function renderCommunityPosts(posts) {
+      if (!Array.isArray(posts) || !posts.length) {
+        communityPosts.innerHTML = '<div class="community-empty">No community posts found for the current filter.</div>';
+        return;
+      }
+
+      communityPosts.innerHTML = posts.map(post => {
+        const tags = Array.isArray(post.tags) ? post.tags : [];
+        const comments = Array.isArray(post.comments) ? post.comments : [];
+        return `
+          <article class="community-card">
+            <div class="community-topline">
+              <div>
+                <h3>${escapeHtml(post.torrent?.name || 'Untitled torrent')}</h3>
+                <div class="community-muted">Posted by ${escapeHtml(post.author_email || 'unknown')} · ${escapeHtml(formatTimestamp(post.created_at))}</div>
+              </div>
+              <div class="chip-row">
+                <span class="chip" data-tone="success">Up ${escapeHtml(post.upvote_count ?? 0)}</span>
+                <span class="chip" data-tone="warning">Down ${escapeHtml(post.downvote_count ?? 0)}</span>
+                <span class="chip">Score ${escapeHtml(post.score ?? 0)}</span>
+              </div>
+            </div>
+
+            ${post.caption ? `<p class="community-caption">${escapeHtml(post.caption)}</p>` : ''}
+
+            <div class="chip-row" style="margin-top: 12px;">
+              ${post.torrent?.category ? `<span class="tag">${escapeHtml(post.torrent.category)}</span>` : ''}
+              ${post.torrent?.size ? `<span class="tag">${escapeHtml(post.torrent.size)}</span>` : ''}
+              ${tags.map(tag => `<button class="btn btn--ghost btn--small communityTagBtn" type="button" data-tag="${escapeHtml(tag)}">#${escapeHtml(tag)}</button>`).join('')}
+            </div>
+
+            <div class="community-actions">
+              <button class="btn btn--small communityVoteBtn" type="button" data-post-id="${escapeHtml(post.id)}" data-vote="1" data-current-vote="${escapeHtml(post.user_vote ?? 0)}">
+                ${post.user_vote === 1 ? 'Remove upvote' : 'Upvote'}
+              </button>
+              <button class="btn btn--ghost btn--small communityVoteBtn" type="button" data-post-id="${escapeHtml(post.id)}" data-vote="-1" data-current-vote="${escapeHtml(post.user_vote ?? 0)}">
+                ${post.user_vote === -1 ? 'Remove downvote' : 'Downvote'}
+              </button>
+              <span class="community-muted">${escapeHtml(post.comment_count ?? comments.length)} comment${(post.comment_count ?? comments.length) === 1 ? '' : 's'}</span>
+            </div>
+
+            <div class="community-comments" style="margin-top: 14px;">
+              ${comments.length ? comments.map(comment => `
+                <div class="community-comment">
+                  <strong>${escapeHtml(comment.author_email || 'unknown')}</strong>
+                  <div class="community-muted">${escapeHtml(formatTimestamp(comment.created_at))}</div>
+                  <p>${escapeHtml(comment.content || '')}</p>
+                </div>
+              `).join('') : '<div class="community-empty">No comments yet.</div>'}
+            </div>
+
+            <div class="community-inline">
+              <input class="input communityCommentInput" data-post-id="${escapeHtml(post.id)}" type="text" placeholder="Write a comment" />
+              <button class="btn btn--small communityCommentBtn" type="button" data-post-id="${escapeHtml(post.id)}">Comment</button>
+            </div>
+          </article>
+        `;
+      }).join('');
+
+      communityPosts.querySelectorAll('.communityVoteBtn').forEach(button => {
+        button.addEventListener('click', async () => {
+          const postId = button.dataset.postId;
+          const requestedValue = Number(button.dataset.vote || 0);
+          const currentVote = Number(button.dataset.currentVote || 0);
+          const voteValue = currentVote === requestedValue ? 0 : requestedValue;
+          await voteOnCommunityPost(postId, voteValue);
+        });
+      });
+
+      communityPosts.querySelectorAll('.communityCommentBtn').forEach(button => {
+        button.addEventListener('click', async () => {
+          const postId = button.dataset.postId;
+          const input = communityPosts.querySelector(`.communityCommentInput[data-post-id="${CSS.escape(postId)}"]`);
+          if (!input) return;
+          await addCommunityComment(postId, input.value);
+        });
+      });
+
+      communityPosts.querySelectorAll('.communityTagBtn').forEach(button => {
+        button.addEventListener('click', async () => {
+          const tag = button.dataset.tag || '';
+          communityTagFilter.value = tag;
+          activeCommunityTag = tag;
+          await loadCommunityPosts(tag);
+        });
+      });
+    }
+
+    async function loadCommunityPosts(tag = activeCommunityTag) {
+      activeCommunityTag = String(tag || '').trim().toLowerCase();
+      if (!getStoredToken()) {
+        communityMeta.textContent = 'Sign in to load community posts.';
+        communityPosts.innerHTML = '<div class="community-empty">Authentication is required for community actions.</div>';
+        return;
+      }
+
+      communityMeta.textContent = activeCommunityTag ? `Loading posts tagged #${activeCommunityTag}...` : 'Loading community posts...';
+      const path = activeCommunityTag
+        ? `/community/posts?tag=${encodeURIComponent(activeCommunityTag)}`
+        : '/community/posts';
+      const response = await requestJson(path, { includeAuth: true });
+      out.textContent = JSON.stringify(response.data, null, 2);
+
+      if (!response.ok) {
+        communityMeta.textContent = normalizeApiError(response.data, 'Could not load community posts.');
+        communityPosts.innerHTML = `<div class="community-empty">${escapeHtml(communityMeta.textContent)}</div>`;
+        return;
+      }
+
+      const posts = Array.isArray(response.data) ? response.data : [];
+      communityMeta.textContent = activeCommunityTag
+        ? `${posts.length} post${posts.length === 1 ? '' : 's'} tagged #${activeCommunityTag}`
+        : `${posts.length} community post${posts.length === 1 ? '' : 's'} loaded`;
+
+      const enriched = await Promise.all(posts.map(async post => {
+        const commentsResponse = await requestJson(`/community/posts/${encodeURIComponent(post.id)}/comments`, { includeAuth: true });
+        return {
+          ...post,
+          comments: commentsResponse.ok && Array.isArray(commentsResponse.data) ? commentsResponse.data : [],
+        };
+      }));
+
+      renderCommunityPosts(enriched);
+    }
+
+    async function createCommunityPost() {
+      if (!getStoredToken()) {
+        communityMeta.textContent = 'Sign in before posting to the community.';
+        return;
+      }
+      if (!selectedCommunityTorrent) {
+        communityMeta.textContent = 'Select a torrent from search results first.';
+        return;
+      }
+
+      communityMeta.textContent = 'Publishing post...';
+      const response = await requestJson('/community/posts', {
+        method: 'POST',
+        includeAuth: true,
+        body: {
+          caption: communityCaption.value.trim(),
+          torrent: communityPostPayload(selectedCommunityTorrent),
+          tags: parseTags(communityTags.value),
+        },
+      });
+      out.textContent = JSON.stringify(response.data, null, 2);
+
+      if (!response.ok) {
+        communityMeta.textContent = normalizeApiError(response.data, 'Could not publish post.');
+        return;
+      }
+
+      communityCaption.value = '';
+      communityTags.value = '';
+      communityMeta.textContent = 'Community post published.';
+      await loadCommunityPosts(activeCommunityTag);
+    }
+
+    async function voteOnCommunityPost(postId, voteValue) {
+      if (!postId) return;
+      const response = await requestJson(`/community/posts/${encodeURIComponent(postId)}/vote`, {
+        method: 'PUT',
+        includeAuth: true,
+        body: { value: voteValue },
+      });
+      out.textContent = JSON.stringify(response.data, null, 2);
+      communityMeta.textContent = response.ok
+        ? 'Vote saved.'
+        : normalizeApiError(response.data, 'Could not save vote.');
+      if (response.ok) {
+        await loadCommunityPosts(activeCommunityTag);
+      }
+    }
+
+    async function addCommunityComment(postId, content) {
+      const trimmed = String(content || '').trim();
+      if (!postId || !trimmed) return;
+
+      const response = await requestJson(`/community/posts/${encodeURIComponent(postId)}/comments`, {
+        method: 'POST',
+        includeAuth: true,
+        body: { content: trimmed },
+      });
+      out.textContent = JSON.stringify(response.data, null, 2);
+      communityMeta.textContent = response.ok
+        ? 'Comment posted.'
+        : normalizeApiError(response.data, 'Could not post comment.');
+      if (response.ok) {
+        await loadCommunityPosts(activeCommunityTag);
+      }
     }
 
     function mediaExtension(name) {
@@ -1349,6 +1728,7 @@
 
               <div class="result-actions">
                 <button type="button" class="btn btn--small playBtn" data-idx="${idx}">Prepare &amp; Play</button>
+                <button type="button" class="btn btn--ghost btn--small forumBtn" data-idx="${idx}">Post to forum</button>
                 <button type="button" class="btn btn--ghost btn--small copyBtn" data-magnet="${escapeHtml(item.magnet || '')}">Copy magnet</button>
                 <a class="link" href="${escapeHtml(item.magnet || '#')}" target="_blank" rel="noopener">Open magnet</a>
               </div>
@@ -1375,6 +1755,18 @@
           } catch (_) {
             resultsMeta.textContent = 'Clipboard unavailable.';
           }
+        });
+      });
+
+      container.querySelectorAll('.forumBtn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const idx = Number(btn.dataset.idx);
+          const item = items[idx];
+          if (!item) return;
+          selectedCommunityTorrent = item;
+          renderSelectedCommunityTorrent();
+          communityMeta.textContent = `Selected "${item.name}" for a community post.`;
+          document.getElementById('communityCard').scrollIntoView({ behavior: 'smooth', block: 'start' });
         });
       });
     }
@@ -1444,6 +1836,34 @@
       document.getElementById('searchQuery').value = 'Titanic';
       document.getElementById('searchCategory').value = 'movies';
       document.getElementById('searchForm').requestSubmit();
+    });
+
+    document.getElementById('createCommunityPost').addEventListener('click', async () => {
+      await createCommunityPost();
+    });
+
+    document.getElementById('clearCommunityComposer').addEventListener('click', () => {
+      selectedCommunityTorrent = null;
+      communityCaption.value = '';
+      communityTags.value = '';
+      renderSelectedCommunityTorrent();
+      communityMeta.textContent = 'Community composer cleared.';
+    });
+
+    document.getElementById('reloadCommunity').addEventListener('click', async () => {
+      await loadCommunityPosts(activeCommunityTag);
+    });
+
+    document.getElementById('applyCommunityFilter').addEventListener('click', async () => {
+      activeCommunityTag = communityTagFilter.value.trim().toLowerCase().replace(/^#+/, '');
+      communityTagFilter.value = activeCommunityTag;
+      await loadCommunityPosts(activeCommunityTag);
+    });
+
+    document.getElementById('clearCommunityFilter').addEventListener('click', async () => {
+      activeCommunityTag = '';
+      communityTagFilter.value = '';
+      await loadCommunityPosts('');
     });
 
     document.getElementById('resetPlayer').addEventListener('click', resetPlayer);
@@ -1554,8 +1974,12 @@
 
     attachMediaDebugLogging();
     renderToken();
+    renderSelectedCommunityTorrent();
     resetPlayer();
     resultsMeta.textContent = 'Ready to search.';
+    if (getStoredToken()) {
+      void loadCommunityPosts();
+    }
   </script>
 </body>
 </html>

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from auth import get_current_user
 from models import (
@@ -85,11 +85,18 @@ async def _user_vote_value(post_id: str, user_id: str) -> int:
 
 
 @router.get("/posts")
-async def get_posts(user: User = Depends(get_current_user)):
+async def get_posts(
+    tag: str | None = Query(default=None),
+    user: User = Depends(get_current_user),
+):
     user_id = str(user.id)
-    posts = await CommunityPost.find_all().sort(
-        [("score", -1), ("created_at", -1)]
-    ).to_list()
+    normalized_tag = tag.strip().lower() if tag else None
+    post_query = (
+        CommunityPost.find(CommunityPost.tags == normalized_tag)
+        if normalized_tag
+        else CommunityPost.find_all()
+    )
+    posts = await post_query.sort([("score", -1), ("created_at", -1)]).to_list()
 
     post_ids = {str(post.id) for post in posts}
     votes = await CommunityPostVote.find(CommunityPostVote.user_id == user_id).to_list() if posts else []

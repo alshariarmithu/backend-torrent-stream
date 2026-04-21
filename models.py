@@ -128,6 +128,7 @@ class CommunityPost(Document):
         indexes = [
             [("score", -1), ("created_at", -1)],
             [("created_at", -1)],
+            [("tags", 1), ("created_at", -1)],
         ]
 
 
