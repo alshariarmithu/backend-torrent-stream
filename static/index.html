@@ -3,126 +3,66 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>TorrentStream Demo Console</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet">
-  <style>
-    :root {
-      color-scheme: dark;
-      --bg: #07111f;
-      --panel: rgba(8, 18, 33, 0.76);
-      --panel-strong: rgba(8, 18, 33, 0.92);
-      --border: rgba(148, 163, 184, 0.18);
-      --text: #e5eefc;
-      --muted: #94a3b8;
-      --accent: #38bdf8;
-      --accent-2: #14b8a6;
-      --warning: #f59e0b;
-      --success: #34d399;
-      --danger: #fb7185;
-      --shadow: 0 24px 80px rgba(2, 8, 23, 0.45);
-      --radius: 24px;
-      --radius-sm: 16px;
+    async function prepareAndPlay(hash, magnet, name) {
+      const token = getStoredToken();
+      if (!token) {
+        alert('Login first or paste a token.');
+        return;
+      }
+
+      resetPlayer();
+      streamReady = false;
+      playerMeta.textContent = `Preparing HTTP stream for: ${name}`;
+      setConnection('HTTP prep', 'warning');
+      setStage('Preparing', 'warning');
+      resultsMeta.textContent = `Preparing ${name}…`;
+
+      try {
+        const path = `/stream/magnet/${encodeURIComponent(hash)}?magnet=${encodeURIComponent(magnet)}`;
+        const response = await getJson(path, true);
+        out.textContent = JSON.stringify(response, null, 2);
+
+        if (!response || !response.stream_url) {
+          throw new Error(response?.message || 'Missing stream URL');
+        }
+
+        const selectedVideo = response.selected_video?.name || '(unknown)';
+        const subtitleCount = Array.isArray(response.subtitle_tracks) ? response.subtitle_tracks.length : 0;
+        const contentType = response.content_type || response.selected_video?.content_type || mimeFromVideoName(selectedVideo);
+        const playbackUrl = new URL(response.stream_url, window.location.origin);
+        playbackUrl.searchParams.set('token', token);
+
+        currentSelectedVideo = selectedVideo;
+        currentContentType = contentType;
+        streamReady = true;
+        updateProgress(response.prepared ? 100 : 0);
+
+        if (!browserCanPlayVideo(selectedVideo, contentType)) {
+          setConnection('Browser limited', 'warning');
+          setStage('Unsupported', 'warning');
+          playerMeta.textContent = `Selected file ${selectedVideo}${contentType ? ` (${contentType})` : ''} is not playable in this browser. Try an MP4/MOV/WEBM source or open it in the iOS app.`;
+          resultsMeta.textContent = `Prepared ${selectedVideo}, but browser playback is not supported for this format.`;
+          return;
+        }
+
+        setConnection(response.prepared ? 'Streaming' : 'Warming up', response.prepared ? 'success' : 'warning');
+        setStage(response.prepared ? 'Ready' : 'Preparing', response.prepared ? 'success' : 'warning');
+        playerMeta.textContent = response.prepared
+          ? `Now playing: ${selectedVideo} | Subtitles: ${subtitleCount}`
+          : `HTTP stream URL ready for ${selectedVideo}. The torrent is still warming up.`;
+
+        streamVideo.src = playbackUrl.toString();
+        streamVideo.load();
+        try { await streamVideo.play(); } catch (_) {}
+        resultsMeta.textContent = `Streaming ${selectedVideo} over HTTP`;
+      } catch (error) {
+        setConnection('Error', 'danger');
+        setStage('Failed', 'danger');
+        const message = error instanceof Error ? error.message : String(error || 'Unknown error');
+        playerMeta.textContent = `Prepare failed: ${message}`;
+        resultsMeta.textContent = 'HTTP stream preparation failed.';
+      }
     }
-
-    * { box-sizing: border-box; }
-
-    html { scroll-behavior: smooth; }
-
-    body {
-      margin: 0;
-      min-height: 100vh;
-      font-family: "Manrope", "Segoe UI", sans-serif;
-      color: var(--text);
-      background:
-        radial-gradient(circle at top left, rgba(56, 189, 248, 0.16), transparent 30%),
-        radial-gradient(circle at top right, rgba(20, 184, 166, 0.12), transparent 28%),
-        linear-gradient(180deg, #040814 0%, var(--bg) 35%, #050b16 100%);
-      overflow-x: hidden;
-    }
-
-    body::before,
-    body::after {
-      content: "";
-      position: fixed;
-      inset: auto;
-      width: 36rem;
-      height: 36rem;
-      border-radius: 50%;
-      filter: blur(80px);
-      opacity: 0.18;
-      pointer-events: none;
-      z-index: 0;
-    }
-
-    body::before {
-      top: -10rem;
-      left: -12rem;
-      background: #0ea5e9;
-    }
-
-    body::after {
-      right: -12rem;
-      bottom: -14rem;
-      background: #14b8a6;
-    }
-
-    .shell {
-      position: relative;
-      z-index: 1;
-      width: min(1440px, calc(100vw - 32px));
-      margin: 0 auto;
-      padding: 24px 0 40px;
-    }
-
-    .hero {
-      display: grid;
-      grid-template-columns: minmax(0, 1.6fr) 320px;
-      gap: 20px;
-      align-items: stretch;
-      padding: 28px;
-      margin-bottom: 22px;
-      border: 1px solid var(--border);
-      border-radius: calc(var(--radius) + 4px);
-      background: linear-gradient(180deg, rgba(12, 20, 35, 0.84), rgba(8, 18, 33, 0.66));
-      box-shadow: var(--shadow);
-      backdrop-filter: blur(18px);
-    }
-
-    .eyebrow {
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      padding: 8px 12px;
-      border-radius: 999px;
-      background: rgba(56, 189, 248, 0.12);
-      color: #bfe9ff;
-      font-size: 0.8rem;
-      font-weight: 700;
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
-    }
-
-    .hero h1 {
-      margin: 14px 0 12px;
-      font-family: "Space Grotesk", "Manrope", sans-serif;
-      font-size: clamp(2rem, 4vw, 4.1rem);
-      line-height: 0.98;
-      letter-spacing: -0.05em;
-      max-width: 14ch;
-    }
-
-    .hero p {
-      margin: 0;
-      max-width: 68ch;
-      color: var(--muted);
-      line-height: 1.7;
-      font-size: 1rem;
-    }
-
-    .hero-actions {
-      display: flex;
       flex-wrap: wrap;
       gap: 12px;
       margin-top: 18px;
@@ -584,11 +524,11 @@
         <span class="eyebrow">TorrentStream demo console</span>
         <h1>Prepare torrents, watch live stream status, and play the video in-browser.</h1>
         <p>
-          Search results feed the websocket prep loop, the server selects the best video file and subtitle tracks,
+          Search results feed the HTTP stream prep flow, the server selects the best video file and subtitle tracks,
           and the browser player starts only when the stream is ready.
         </p>
         <div class="stats-row">
-          <span class="chip" data-tone="accent">WebSocket prep</span>
+          <span class="chip" data-tone="accent">HTTP range</span>
           <span class="chip" data-tone="success">HTTP range streaming</span>
           <span class="chip" data-tone="warning">Subtitle scan</span>
         </div>
@@ -620,7 +560,7 @@
           <div class="panel-head">
             <div>
               <h2>Authentication</h2>
-              <p>Login or register, then reuse the token for search, websocket prep, and stream playback.</p>
+              <p>Login or register, then reuse the token for search, HTTP prep, and stream playback.</p>
             </div>
             <div class="status-pill" id="authState" data-tone="accent">Ready</div>
           </div>
@@ -666,7 +606,7 @@
           <div class="search-top">
             <div>
               <h2 style="margin:0; font-family:'Space Grotesk', sans-serif; letter-spacing:-0.03em;">Search library</h2>
-              <p class="panel-subtle">Pick a result, then prepare and play it through the websocket flow.</p>
+              <p class="panel-subtle">Pick a result, then prepare and play it through the direct HTTP stream flow.</p>
             </div>
             <div id="resultsMeta" class="results-meta">Ready to search.</div>
           </div>
@@ -702,7 +642,7 @@
           <div class="panel-head">
             <div>
               <h2>Stream player</h2>
-              <p>Browser playback starts when the server sends a ready event over websocket.</p>
+              <p>Browser playback starts after the backend returns the HTTP stream URL.</p>
             </div>
             <button class="btn btn--ghost btn--small" type="button" id="resetPlayer">Reset</button>
           </div>
@@ -723,7 +663,7 @@
           <div class="panel-head">
             <div>
               <h2>Response console</h2>
-              <p>Inspect the latest auth, search, websocket, or stream payload.</p>
+              <p>Inspect the latest auth, search, or stream payload.</p>
             </div>
             <div class="status-pill" data-tone="accent">Debug</div>
           </div>
@@ -733,7 +673,7 @@
     </main>
 
     <footer class="footer">
-      <span>Websocket prep + HTTP range playback</span>
+      <span>HTTP range playback</span>
       <span>Open the backend UI, search a title, then hit Prepare &amp; Play.</span>
     </footer>
   </div>
@@ -749,8 +689,6 @@
     const stageChip = document.getElementById('stageChip');
     const authState = document.getElementById('authState');
     const resultsMeta = document.getElementById('resultsMeta');
-    let streamSocket = null;
-    let streamReady = false;
     let currentSelectedVideo = '';
     let currentContentType = '';
 
@@ -871,20 +809,7 @@
       return streamVideo.canPlayType(mime) !== '';
     }
 
-    function buildWsUrl(hash, token) {
-      return `wss://${window.location.host}/stream/ws?hash=${encodeURIComponent(hash)}&token=${encodeURIComponent(token)}`;
-    }
-
-    function closeStreamSocket() {
-      if (streamSocket) {
-        try { streamSocket.close(); } catch (_) {}
-        streamSocket = null;
-      }
-    }
-
     function resetPlayer() {
-      closeStreamSocket();
-      streamReady = false;
       currentSelectedVideo = '';
       currentContentType = '';
       streamVideo.pause();
@@ -904,117 +829,55 @@
       }
 
       resetPlayer();
-      streamReady = false;
-      playerMeta.textContent = `Preparing stream for: ${name}`;
-      setConnection('Connecting', 'warning');
+      playerMeta.textContent = `Preparing HTTP stream for: ${name}`;
+      setConnection('HTTP prep', 'warning');
       setStage('Preparing', 'warning');
       resultsMeta.textContent = `Preparing ${name}…`;
 
-      const wsUrl = buildWsUrl(hash, token);
-      streamSocket = new WebSocket(wsUrl);
+      try {
+        const path = `/stream/magnet/${encodeURIComponent(hash)}?magnet=${encodeURIComponent(magnet)}`;
+        const response = await getJson(path, true);
+        out.textContent = JSON.stringify(response, null, 2);
 
-      streamSocket.onopen = () => {
-        setConnection('Socket open', 'success');
-        playerMeta.textContent = 'Socket connected. Fetching nodes and metadata…';
-        try {
-          streamSocket.send(JSON.stringify({ hash, magnet }));
-        } catch (_) {}
-      };
+        if (!response || !response.stream_url) {
+          throw new Error(response?.message || 'Missing stream URL');
+        }
 
-      streamSocket.onmessage = async (event) => {
-        let message;
-        try {
-          message = JSON.parse(event.data);
-        } catch (_) {
+        const selectedVideo = response.selected_video?.name || '(unknown)';
+        const subtitleCount = Array.isArray(response.subtitle_tracks) ? response.subtitle_tracks.length : 0;
+        const contentType = response.content_type || response.selected_video?.content_type || mimeFromVideoName(selectedVideo);
+        const playbackUrl = new URL(response.stream_url, window.location.origin);
+        playbackUrl.searchParams.set('token', token);
+
+        currentSelectedVideo = selectedVideo;
+        currentContentType = contentType;
+        updateProgress(response.prepared ? 100 : 0);
+
+        if (!browserCanPlayVideo(selectedVideo, contentType)) {
+          setConnection('Browser limited', 'warning');
+          setStage('Unsupported', 'warning');
+          playerMeta.textContent = `Selected file ${selectedVideo}${contentType ? ` (${contentType})` : ''} is not playable in this browser. Try an MP4/MOV/WEBM source or open it in the iOS app.`;
+          resultsMeta.textContent = `Prepared ${selectedVideo}, but browser playback is not supported for this format.`;
           return;
         }
 
-        out.textContent = JSON.stringify(message, null, 2);
+        setConnection(response.prepared ? 'Streaming' : 'Warming up', response.prepared ? 'success' : 'warning');
+        setStage(response.prepared ? 'Ready' : 'Preparing', response.prepared ? 'success' : 'warning');
+        playerMeta.textContent = response.prepared
+          ? `Now playing: ${selectedVideo} | Subtitles: ${subtitleCount}`
+          : `HTTP stream URL ready for ${selectedVideo}. The torrent is still warming up.`;
 
-        if (message.type === 'started') {
-          setConnection('Fetching', 'warning');
-          setStage('Started', 'accent');
-          if (message.message) playerMeta.textContent = message.message;
-          return;
-        }
-
-        if (message.type === 'status') {
-          const pct = Math.round((message.progress || 0) * 100);
-          const peers = message.num_peers || 0;
-          updateProgress(pct);
-          setConnection(`Peers ${peers}`, peers > 0 ? 'success' : 'warning');
-          setStage(message.has_metadata ? 'Metadata ready' : 'Fetching metadata', message.has_metadata ? 'success' : 'warning');
-          playerMeta.textContent = message.has_metadata
-            ? 'Metadata fetched. Choosing stream…'
-            : `Fetching nodes… ${pct}% | peers: ${peers}`;
-          return;
-        }
-
-        if (message.type === 'need_magnet') {
-          try {
-            streamSocket.send(JSON.stringify({ hash, magnet }));
-          } catch (_) {}
-          return;
-        }
-
-        if (message.type === 'ready') {
-          const playbackUrl = message.stream_url;
-          const selectedVideo = message.selected_video?.name || '(unknown)';
-          const subtitleCount = Array.isArray(message.subtitle_tracks) ? message.subtitle_tracks.length : 0;
-          const contentType = message.content_type || mimeFromVideoName(selectedVideo);
-          streamReady = true;
-          updateProgress(100);
-
-          currentSelectedVideo = selectedVideo;
-          currentContentType = contentType;
-
-          if (!browserCanPlayVideo(selectedVideo, contentType)) {
-            setConnection('Browser limited', 'warning');
-            setStage('Unsupported', 'warning');
-            playerMeta.textContent = `Selected file ${selectedVideo}${contentType ? ` (${contentType})` : ''} is not playable in this browser. Try an MP4/MOV/WEBM source or open it in the iOS app.`;
-            resultsMeta.textContent = `Prepared ${selectedVideo}, but browser playback is not supported for this format.`;
-            closeStreamSocket();
-            return;
-          }
-
-          setConnection('Streaming', 'success');
-          setStage('Ready', 'success');
-          playerMeta.textContent = `Now playing: ${selectedVideo} | Subtitles: ${subtitleCount}`;
-
-          streamVideo.src = playbackUrl;
-          streamVideo.load();
-          try { await streamVideo.play(); } catch (_) {}
-          closeStreamSocket();
-          resultsMeta.textContent = `Streaming ${selectedVideo}`;
-          return;
-        }
-
-        if (message.type === 'error') {
-          setConnection('Error', 'danger');
-          setStage('Failed', 'danger');
-          playerMeta.textContent = `Prepare failed: ${message.message || 'Unknown error'}`;
-          resultsMeta.textContent = 'Stream preparation failed.';
-          closeStreamSocket();
-          return;
-        }
-
-        if (message.message) {
-          playerMeta.textContent = message.message;
-        }
-      };
-
-      streamSocket.onerror = () => {
-        setConnection('Socket error', 'danger');
-        playerMeta.textContent = 'Socket error while preparing stream.';
-      };
-
-      streamSocket.onclose = (evt) => {
-        if (!streamReady && evt.code !== 1000) {
-          setConnection('Disconnected', 'danger');
-          playerMeta.textContent = `Socket closed (${evt.code}).`;
-          resultsMeta.textContent = 'Socket disconnected before playback started.';
-        }
-      };
+        streamVideo.src = playbackUrl.toString();
+        streamVideo.load();
+        try { await streamVideo.play(); } catch (_) {}
+        resultsMeta.textContent = `Streaming ${selectedVideo} over HTTP`;
+      } catch (error) {
+        setConnection('Error', 'danger');
+        setStage('Failed', 'danger');
+        const message = error instanceof Error ? error.message : String(error || 'Unknown error');
+        playerMeta.textContent = `Prepare failed: ${message}`;
+        resultsMeta.textContent = 'HTTP stream preparation failed.';
+      }
     }
 
     function renderResults(data) {

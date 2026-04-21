@@ -179,6 +179,7 @@ def _best_video_info(handle) -> Optional[dict]:
             continue
 
         ext_rank = PREFERRED_VIDEO_EXTS.index(ext) if ext in PREFERRED_VIDEO_EXTS else len(PREFERRED_VIDEO_EXTS)
+        content_type = mimetypes.guess_type(str(path))[0] or "video/mp4"
 
         candidate = {
             "index": i,
@@ -188,6 +189,7 @@ def _best_video_info(handle) -> Optional[dict]:
             "full_path": str(save_path / path),
             "ext": ext,
             "ext_rank": ext_rank,
+            "content_type": content_type,
         }
 
         if (
@@ -199,7 +201,6 @@ def _best_video_info(handle) -> Optional[dict]:
             )
         ):
             best = candidate
-
     return best
 
 
@@ -523,6 +524,7 @@ def stream_magnet(
 
     base_url = str(request.base_url).rstrip("/")
     stream_path = f"/stream/{torrent_hash}"
+    content_type = video["content_type"] if video else None
 
     return {
         "status": "ready" if prepared and video else "preparing",
@@ -530,11 +532,13 @@ def stream_magnet(
         "hash": torrent_hash,
         "stream_path": stream_path,
         "stream_url": f"{base_url}{stream_path}",
+        "content_type": content_type,
         "magnet": magnet,
         "selected_video": {
             "name": video["name"],
             "path": video["path"],
             "size": video["size"],
+            "content_type": content_type,
         } if video else None,
         "subtitles_available": len(subtitle_tracks) > 0,
         "subtitle_tracks": subtitle_tracks,
@@ -637,15 +641,18 @@ async def _stream_wait_ws_impl(websocket: WebSocket, torrent_hash: str):
 
                     base_url = _http_base_from_websocket(websocket)
                     stream_url = f"{base_url}/stream/{torrent_hash}?token={quote(token, safe='')}"
+                    content_type = video["content_type"]
 
                     await websocket.send_json({
                         "type": "ready",
                         "hash": torrent_hash,
                         "stream_url": stream_url,
+                        "content_type": content_type,
                         "selected_video": {
                             "name": video["name"],
                             "path": video["path"],
                             "size": video["size"],
+                            "content_type": content_type,
                         },
                         "subtitles_available": len(subtitle_tracks) > 0,
                         "subtitle_tracks": subtitle_tracks,
