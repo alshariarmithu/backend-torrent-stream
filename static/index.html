@@ -751,7 +751,6 @@
     const resultsMeta = document.getElementById('resultsMeta');
     let streamSocket = null;
     let streamReady = false;
-    let fallbackStarted = false;
 
     function setBadge(el, text, tone = 'accent') {
       el.textContent = text;
@@ -837,12 +836,6 @@
       return `ws://${window.location.host}/stream/ws?hash=${encodeURIComponent(hash)}&token=${encodeURIComponent(token)}`;
     }
 
-    function buildHttpPlaybackUrl(streamPath, token) {
-      const url = new URL(streamPath, window.location.origin);
-      url.searchParams.set('token', token);
-      return url.toString();
-    }
-
     function closeStreamSocket() {
       if (streamSocket) {
         try { streamSocket.close(); } catch (_) {}
@@ -853,7 +846,6 @@
     function resetPlayer() {
       closeStreamSocket();
       streamReady = false;
-      fallbackStarted = false;
       streamVideo.pause();
       streamVideo.removeAttribute('src');
       streamVideo.load();
@@ -861,63 +853,6 @@
       updateProgress(0);
       setConnection('Idle', 'accent');
       setStage('Waiting', 'accent');
-    }
-
-    async function openHttpFallback(hash, magnet, name, reason) {
-      if (fallbackStarted || streamReady) {
-        return false;
-      }
-
-      fallbackStarted = true;
-      closeStreamSocket();
-      setConnection('HTTP fallback', 'warning');
-      setStage('Preparing', 'warning');
-      playerMeta.textContent = `${reason} Falling back to HTTP prepare for ${name}…`;
-      resultsMeta.textContent = `Preparing ${name} via HTTP fallback…`;
-
-      try {
-        const token = getStoredToken();
-        const response = await fetch(`/stream/magnet/${encodeURIComponent(hash)}?magnet=${encodeURIComponent(magnet)}`, {
-          headers: {
-            Authorization: 'Bearer ' + token,
-          },
-        });
-
-        const text = await response.text();
-        let data;
-        try { data = JSON.parse(text); } catch (_) { data = text; }
-        out.textContent = JSON.stringify(data, null, 2);
-
-        if (!response.ok) {
-          throw new Error(data?.detail || data?.message || `HTTP ${response.status}`);
-        }
-
-        const playbackUrl = buildHttpPlaybackUrl(data.stream_path || `/stream/${hash}`, token);
-        const selectedVideo = data.selected_video?.name || '(unknown)';
-        const subtitleCount = Array.isArray(data.subtitle_tracks) ? data.subtitle_tracks.length : 0;
-        const prepared = Boolean(data.prepared);
-
-        streamReady = true;
-        updateProgress(prepared ? 100 : 35);
-        setConnection(prepared ? 'Streaming' : 'Preparing', prepared ? 'success' : 'warning');
-        setStage(prepared ? 'Ready' : 'Preparing', prepared ? 'success' : 'warning');
-        playerMeta.textContent = prepared
-          ? `Now playing: ${selectedVideo} | Subtitles: ${subtitleCount}`
-          : `HTTP fallback started for ${selectedVideo}. Buffering while torrent prepares…`;
-
-        streamVideo.src = playbackUrl;
-        streamVideo.load();
-        try { await streamVideo.play(); } catch (_) {}
-
-        resultsMeta.textContent = prepared ? `Streaming ${selectedVideo}` : `Preparing ${selectedVideo}`;
-        return true;
-      } catch (error) {
-        setConnection('Fallback failed', 'danger');
-        setStage('Failed', 'danger');
-        playerMeta.textContent = `HTTP fallback failed: ${error.message || error}`;
-        resultsMeta.textContent = 'Stream preparation failed.';
-        return false;
-      }
     }
 
     async function prepareAndPlay(hash, magnet, name) {
@@ -929,7 +864,6 @@
 
       resetPlayer();
       streamReady = false;
-      fallbackStarted = false;
       playerMeta.textContent = `Preparing stream for: ${name}`;
       setConnection('Connecting', 'warning');
       setStage('Preparing', 'warning');
@@ -947,10 +881,6 @@
       };
 
       streamSocket.onmessage = async (event) => {
-        if (fallbackStarted) {
-          return;
-        }
-
         let message;
         try {
           message = JSON.parse(event.data);
@@ -1021,17 +951,13 @@
       streamSocket.onerror = () => {
         setConnection('Socket error', 'danger');
         playerMeta.textContent = 'Socket error while preparing stream.';
-        if (!streamReady) {
-          void openHttpFallback(hash, magnet, name, 'WebSocket unavailable.');
-        }
       };
 
       streamSocket.onclose = (evt) => {
-        if (!streamReady && !fallbackStarted && evt.code !== 1000) {
+        if (!streamReady && evt.code !== 1000) {
           setConnection('Disconnected', 'danger');
-          playerMeta.textContent = `Socket closed (${evt.code}). Trying HTTP fallback…`;
+          playerMeta.textContent = `Socket closed (${evt.code}).`;
           resultsMeta.textContent = 'Socket disconnected before playback started.';
-          void openHttpFallback(hash, magnet, name, `WebSocket closed (${evt.code}).`);
         }
       };
     }
