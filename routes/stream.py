@@ -7,7 +7,12 @@ Install libtorrent:
   Ubuntu: apt-get install python3-libtorrent
   Docker: use image with libtorrent pre-installed (e.g. wernight/qbittorrent)
 
-iOS integration:
+iOS integration (new streamlined flow):
+  NEW: GET /stream/magnet/{hash}?magnet=<encoded>
+       → auto-starts torrent + returns streaming URL
+       → iOS app passes URL directly to AVPlayer
+  
+  Legacy polling-based flow:
   1. POST /stream/start        { magnet, hash }  → starts download
   2. GET  /stream/status/{hash}                  → poll until progress > 1%
   3. GET  /stream/info/{hash}                    → get filename + content-type
@@ -20,9 +25,8 @@ from pydantic import BaseModel
 import os, time, threading, mimetypes
 from pathlib import Path
 from typing import Optional
-
-from auth import get_current_user
-from database import User
+from auth import decode_token, get_current_user
+from models import User
 
 router = APIRouter()
 
@@ -30,10 +34,35 @@ DOWNLOAD_DIR = Path(os.getenv("TORRENT_DOWNLOAD_DIR", "/tmp/torrentstream"))
 DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 VIDEO_EXTS = {".mkv", ".mp4", ".avi", ".mov", ".m4v", ".webm", ".ts", ".mpg", ".mpeg"}
+SUBTITLE_EXTS = {".srt", ".vtt", ".ass", ".ssa", ".sub", ".idx"}
 
 # In-memory session store: hash → libtorrent handle
 _sessions: dict = {}
 _lock = threading.Lock()
+
+
+async def _authorize_stream_request(token: Optional[str], authorization: Optional[str]) -> User:
+    """Support AVPlayer token query auth and standard Bearer auth."""
+    raw_token = token
+
+    if not raw_token and authorization:
+        parts = authorization.split(" ", 1)
+        if len(parts) == 2 and parts[0].lower() == "bearer":
+            raw_token = parts[1].strip()
+
+    if not raw_token:
+        raise HTTPException(status_code=401, detail="Missing auth token")
+
+    payload = decode_token(raw_token)
+    user_id = payload.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Invalid token payload")
+
+    user = await User.get(user_id)
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+
+    return user
 
 
 # ─── libtorrent helpers ───────────────────────────────────────────────────────
@@ -123,6 +152,67 @@ def _best_video(handle) -> Optional[Path]:
     return best
 
 
+def _best_video_info(handle) -> Optional[dict]:
+    """Return metadata about the largest video file in torrent."""
+    if not handle.has_metadata():
+        return None
+
+    ti = handle.get_torrent_info()
+    files = ti.files()
+    save_path = Path(handle.save_path())
+    best: Optional[dict] = None
+
+    for i in range(files.num_files()):
+        path = files.file_path(i)
+        size = files.file_size(i)
+        ext = Path(path).suffix.lower()
+        if ext not in VIDEO_EXTS:
+            continue
+
+        candidate = {
+            "index": i,
+            "name": Path(path).name,
+            "path": str(path),
+            "size": int(size),
+            "full_path": str(save_path / path),
+        }
+
+        if best is None or candidate["size"] > best["size"]:
+            best = candidate
+
+    return best
+
+
+def _subtitle_tracks(handle) -> list[dict]:
+    """List subtitle files available in torrent metadata."""
+    if not handle.has_metadata():
+        return []
+
+    ti = handle.get_torrent_info()
+    files = ti.files()
+    save_path = Path(handle.save_path())
+    tracks: list[dict] = []
+
+    for i in range(files.num_files()):
+        path = files.file_path(i)
+        ext = Path(path).suffix.lower()
+        if ext not in SUBTITLE_EXTS:
+            continue
+
+        tracks.append(
+            {
+                "index": i,
+                "name": Path(path).name,
+                "path": str(path),
+                "size": int(files.file_size(i)),
+                "ext": ext.lstrip("."),
+                "downloaded": (save_path / path).exists(),
+            }
+        )
+
+    return tracks
+
+
 # ─── Request schemas ─────────────────────────────────────────────────────────
 
 class StartRequest(BaseModel):
@@ -207,8 +297,9 @@ def torrent_info(torrent_hash: str, _user: User = Depends(get_current_user)):
 async def stream_torrent(
     torrent_hash: str,
     magnet: Optional[str] = None,
+    token: Optional[str] = None,
     range: Optional[str] = Header(None),
-    _user: User = Depends(get_current_user),
+    authorization: Optional[str] = Header(default=None, alias="Authorization"),
 ):
     """
     Stream the video file via HTTP with Range support (AVPlayer / seek-compatible).
@@ -221,6 +312,8 @@ async def stream_torrent(
     For now the endpoint uses Bearer auth via the standard Depends.
     See /stream/sign/{hash} for a AVPlayer-compatible signed URL approach.
     """
+    await _authorize_stream_request(token=token, authorization=authorization)
+
     ses, _ = _get_lt()
     if ses is None:
         raise HTTPException(503, "libtorrent not installed on the server")
@@ -301,6 +394,78 @@ async def stream_torrent(
         headers=headers,
         media_type=content_type,
     )
+
+
+@router.get("/magnet/{torrent_hash}")
+def stream_magnet(
+    request: Request,
+    torrent_hash: str,
+    magnet: Optional[str] = None,
+    _user: User = Depends(get_current_user),
+):
+    """
+    Streamlined flow: auto-start torrent + return streaming URL.
+    
+    iOS Usage:
+      GET /stream/magnet/{hash}?magnet=<encoded_magnet_link>
+      Response: { "stream_url": "https://..." }
+      
+    The returned URL can be passed directly to AVPlayer without polling.
+    The first request may block briefly while libtorrent initializes.
+    """
+    ses, _ = _get_lt()
+    if ses is None:
+        raise HTTPException(
+            503,
+            "libtorrent not installed. "
+            "macOS: brew install libtorrent-rasterbar && pip install python-libtorrent"
+        )
+
+    # Auto-start torrent if magnet provided and not yet running
+    if magnet:
+        with _lock:
+            if torrent_hash not in _sessions:
+                _add_or_get(magnet, torrent_hash)
+    else:
+        with _lock:
+            if torrent_hash not in _sessions:
+                raise HTTPException(
+                    400,
+                    "Magnet link required: ?magnet=<encoded_link>"
+                )
+
+    with _lock:
+        handle = _sessions.get(torrent_hash)
+    if not handle:
+        raise HTTPException(404, "Torrent not started")
+
+    # Heavy preparation on server: wait metadata, choose best video, scan subtitles.
+    if not _wait_metadata(handle, timeout=90):
+        raise HTTPException(504, "Timed out waiting for torrent metadata")
+
+    video = _best_video_info(handle)
+    if not video:
+        raise HTTPException(404, "No playable video file found in torrent")
+
+    subtitle_tracks = _subtitle_tracks(handle)
+
+    base_url = str(request.base_url).rstrip("/")
+    stream_path = f"/stream/{torrent_hash}"
+
+    return {
+        "hash": torrent_hash,
+        "stream_path": stream_path,
+        "stream_url": f"{base_url}{stream_path}",
+        "magnet": magnet,
+        "selected_video": {
+            "name": video["name"],
+            "path": video["path"],
+            "size": video["size"],
+        },
+        "subtitles_available": len(subtitle_tracks) > 0,
+        "subtitle_tracks": subtitle_tracks,
+        "message": "Torrent prepared. Stream link ready for AVPlayer."
+    }
 
 
 @router.delete("/{torrent_hash}")

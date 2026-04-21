@@ -1,5 +1,6 @@
 from dotenv import load_dotenv
 import os
+from importlib import import_module
 load_dotenv()
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,6 +11,12 @@ from auth import router as auth_router
 from db import lifespan_context
 from routes.lists import router as lists_router
 from routes.search import router as search_router
+from routes.stream import router as stream_router
+
+try:
+    community_router = import_module("routes.community").router
+except Exception:
+    community_router = None
 
 app = FastAPI(
     title="TorrentStream API",
@@ -28,7 +35,10 @@ app.add_middleware(
 
 app.include_router(auth_router, prefix="/auth", tags=["Auth"])
 app.include_router(lists_router, prefix="/lists", tags=["Lists"])
+if community_router is not None:
+    app.include_router(community_router, prefix="/community", tags=["Community"])
 app.include_router(search_router, prefix="/search", tags=["Search"])
+app.include_router(stream_router, prefix="/stream", tags=["Stream"])
 
 # serve a basic static UI
 app.mount("/static", StaticFiles(directory="static"), name="static")
