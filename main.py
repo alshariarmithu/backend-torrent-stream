@@ -9,6 +9,7 @@ from fastapi.staticfiles import StaticFiles
 from auth import router as auth_router
 from db import lifespan_context
 from routes.lists import router as lists_router
+from routes.community import router as community_router
 from routes.search import router as search_router
 
 app = FastAPI(
@@ -28,6 +29,7 @@ app.add_middleware(
 
 app.include_router(auth_router, prefix="/auth", tags=["Auth"])
 app.include_router(lists_router, prefix="/lists", tags=["Lists"])
+app.include_router(community_router, prefix="/community", tags=["Community"])
 app.include_router(search_router, prefix="/search", tags=["Search"])
 
 # serve a basic static UI

@@ -104,3 +104,57 @@ class PlaylistCreate(BaseModel):
 class PlaylistItemAdd(BaseModel):
     torrent: TorrentPayload
     position: Optional[int] = 0
+
+
+class CommunityPost(Document):
+    user_id: str
+    author_email: EmailStr
+    caption: str = ""
+    torrent: TorrentPayload
+    score: int = 0
+    upvote_count: int = 0
+    downvote_count: int = 0
+    comment_count: int = 0
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+    class Settings:
+        name = "community_posts"
+
+
+class CommunityComment(Document):
+    post_id: str
+    user_id: str
+    author_email: EmailStr
+    content: str
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+    class Settings:
+        name = "community_comments"
+        indexes = [[("post_id", 1), ("created_at", 1)]]
+
+
+class CommunityPostVote(Document):
+    post_id: str
+    user_id: str
+    value: int
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+    class Settings:
+        name = "community_post_votes"
+        indexes = [
+            [("post_id", 1), ("user_id", 1)],
+        ]
+
+
+class CommunityPostCreate(BaseModel):
+    caption: Optional[str] = ""
+    torrent: TorrentPayload
+
+
+class CommunityCommentCreate(BaseModel):
+    content: str
+
+
+class CommunityVoteUpdate(BaseModel):
+    value: int
