@@ -177,8 +177,38 @@
 
       const selectedVideo = response.selected_video?.name || '(unknown)';
       const subtitleCount = Array.isArray(response.subtitle_tracks) ? response.subtitle_tracks.length : 0;
-      playerMeta.textContent = `Now playing: ${selectedVideo} | Subtitles: ${subtitleCount} | URL: ${playbackUrl}`;
+      if(response.prepared === false){
+        playerMeta.textContent = `Preparing torrent metadata... playback may take up to a couple of minutes | URL: ${playbackUrl}`;
+      } else {
+        playerMeta.textContent = `Now playing: ${selectedVideo} | Subtitles: ${subtitleCount} | URL: ${playbackUrl}`;
+      }
     }
+
+    streamVideo.addEventListener('waiting', () => {
+      playerMeta.textContent = 'Player buffering... waiting for torrent pieces.';
+    });
+
+    streamVideo.addEventListener('playing', () => {
+      if(streamVideo.currentSrc){
+        playerMeta.textContent = `Playing stream: ${streamVideo.currentSrc}`;
+      }
+    });
+
+    streamVideo.addEventListener('error', () => {
+      const mediaError = streamVideo.error;
+      if(!mediaError){
+        playerMeta.textContent = 'Playback failed: unknown media error.';
+        return;
+      }
+
+      const codeMap = {
+        1: 'MEDIA_ERR_ABORTED',
+        2: 'MEDIA_ERR_NETWORK',
+        3: 'MEDIA_ERR_DECODE',
+        4: 'MEDIA_ERR_SRC_NOT_SUPPORTED',
+      };
+      playerMeta.textContent = `Playback failed: ${codeMap[mediaError.code] || mediaError.code}. If this keeps happening, try a torrent with MP4/MOV source and active seeders.`;
+    });
 
     // register
     document.getElementById('registerForm').addEventListener('submit', async e =>{

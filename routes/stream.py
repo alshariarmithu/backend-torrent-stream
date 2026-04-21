@@ -35,6 +35,22 @@ DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 VIDEO_EXTS = {".mkv", ".mp4", ".avi", ".mov", ".m4v", ".webm", ".ts", ".mpg", ".mpeg"}
 SUBTITLE_EXTS = {".srt", ".vtt", ".ass", ".ssa", ".sub", ".idx"}
+PREFERRED_VIDEO_EXTS = (".mp4", ".m4v", ".mov", ".webm", ".mkv", ".avi", ".ts", ".mpg", ".mpeg")
+
+
+def _env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
+
+
+PREPARE_TIMEOUT_SEC = _env_int("STREAM_PREPARE_TIMEOUT", 25)
+METADATA_TIMEOUT_SEC = _env_int("STREAM_METADATA_TIMEOUT", 180)
+FILE_WAIT_TIMEOUT_SEC = _env_int("STREAM_FILE_WAIT_TIMEOUT", 120)
 
 # In-memory session store: hash → libtorrent handle
 _sessions: dict = {}
@@ -138,18 +154,10 @@ def _wait_metadata(handle, timeout: int = 60) -> bool:
 
 def _best_video(handle) -> Optional[Path]:
     """Return path to the largest video file inside the torrent."""
-    if not handle.has_metadata():
+    info = _best_video_info(handle)
+    if not info:
         return None
-    ti        = handle.get_torrent_info()
-    files     = ti.files()
-    save_path = Path(handle.save_path())
-    best, best_size = None, 0
-    for i in range(files.num_files()):
-        path = files.file_path(i)
-        size = files.file_size(i)
-        if Path(path).suffix.lower() in VIDEO_EXTS and size > best_size:
-            best, best_size = save_path / path, size
-    return best
+    return Path(info["full_path"])
 
 
 def _best_video_info(handle) -> Optional[dict]:
@@ -169,15 +177,26 @@ def _best_video_info(handle) -> Optional[dict]:
         if ext not in VIDEO_EXTS:
             continue
 
+        ext_rank = PREFERRED_VIDEO_EXTS.index(ext) if ext in PREFERRED_VIDEO_EXTS else len(PREFERRED_VIDEO_EXTS)
+
         candidate = {
             "index": i,
             "name": Path(path).name,
             "path": str(path),
             "size": int(size),
             "full_path": str(save_path / path),
+            "ext": ext,
+            "ext_rank": ext_rank,
         }
 
-        if best is None or candidate["size"] > best["size"]:
+        if (
+            best is None
+            or candidate["ext_rank"] < best["ext_rank"]
+            or (
+                candidate["ext_rank"] == best["ext_rank"]
+                and candidate["size"] > best["size"]
+            )
+        ):
             best = candidate
 
     return best
@@ -211,6 +230,39 @@ def _subtitle_tracks(handle) -> list[dict]:
         )
 
     return tracks
+
+
+def _prioritize_files(handle, video_index: Optional[int], subtitle_indexes: list[int]) -> None:
+    """Prioritize selected video and subtitle files for faster startup."""
+    if not handle.has_metadata():
+        return
+
+    try:
+        ti = handle.get_torrent_info()
+        file_count = ti.files().num_files()
+    except Exception:
+        return
+
+    priorities = [0] * file_count
+    if video_index is not None and 0 <= video_index < file_count:
+        priorities[video_index] = 7
+    for idx in subtitle_indexes:
+        if 0 <= idx < file_count and priorities[idx] < 5:
+            priorities[idx] = 5
+
+    try:
+        handle.prioritize_files(priorities)
+        return
+    except Exception:
+        pass
+
+    for idx, priority in enumerate(priorities):
+        if priority <= 0:
+            continue
+        try:
+            handle.file_priority(idx, priority)
+        except Exception:
+            continue
 
 
 # ─── Request schemas ─────────────────────────────────────────────────────────
@@ -276,7 +328,7 @@ def torrent_info(torrent_hash: str, _user: User = Depends(get_current_user)):
         handle = _sessions.get(torrent_hash)
     if not handle:
         raise HTTPException(404, "Torrent not started")
-    if not _wait_metadata(handle, timeout=60):
+    if not _wait_metadata(handle, timeout=METADATA_TIMEOUT_SEC):
         raise HTTPException(504, "Timed out waiting for metadata")
 
     video = _best_video(handle)
@@ -331,16 +383,20 @@ async def stream_torrent(
         raise HTTPException(404, "Torrent not started. POST /stream/start first.")
 
     # Wait for metadata (up to 60 s)
-    if not _wait_metadata(handle, timeout=60):
+    if not _wait_metadata(handle, timeout=METADATA_TIMEOUT_SEC):
         raise HTTPException(504, "Timed out waiting for torrent metadata")
 
-    video_path = _best_video(handle)
-    if not video_path:
+    video = _best_video_info(handle)
+    if not video:
         raise HTTPException(404, "No video file found in torrent")
 
+    subtitle_tracks = _subtitle_tracks(handle)
+    _prioritize_files(handle, video.get("index"), [track["index"] for track in subtitle_tracks])
+    video_path = Path(video["full_path"])
+
     # Wait until file exists on disk (libtorrent creates the file when first pieces arrive)
-    for _ in range(30):
-        if video_path.exists() and video_path.stat().st_size > 0:
+    for _ in range(FILE_WAIT_TIMEOUT_SEC):
+        if video_path.exists():
             break
         time.sleep(1)
     else:
@@ -440,19 +496,18 @@ def stream_magnet(
         raise HTTPException(404, "Torrent not started")
 
     # Heavy preparation on server: wait metadata, choose best video, scan subtitles.
-    if not _wait_metadata(handle, timeout=90):
-        raise HTTPException(504, "Timed out waiting for torrent metadata")
-
-    video = _best_video_info(handle)
-    if not video:
-        raise HTTPException(404, "No playable video file found in torrent")
-
-    subtitle_tracks = _subtitle_tracks(handle)
+    prepared = _wait_metadata(handle, timeout=PREPARE_TIMEOUT_SEC)
+    video = _best_video_info(handle) if prepared else None
+    subtitle_tracks = _subtitle_tracks(handle) if prepared else []
+    if video:
+        _prioritize_files(handle, video.get("index"), [track["index"] for track in subtitle_tracks])
 
     base_url = str(request.base_url).rstrip("/")
     stream_path = f"/stream/{torrent_hash}"
 
     return {
+        "status": "ready" if prepared and video else "preparing",
+        "prepared": bool(prepared and video),
         "hash": torrent_hash,
         "stream_path": stream_path,
         "stream_url": f"{base_url}{stream_path}",
@@ -461,10 +516,14 @@ def stream_magnet(
             "name": video["name"],
             "path": video["path"],
             "size": video["size"],
-        },
+        } if video else None,
         "subtitles_available": len(subtitle_tracks) > 0,
         "subtitle_tracks": subtitle_tracks,
-        "message": "Torrent prepared. Stream link ready for AVPlayer."
+        "message": (
+            "Torrent prepared. Stream link ready for AVPlayer."
+            if prepared and video
+            else "Torrent session started. Metadata is still loading; stream may take longer to start."
+        )
     }
 
 

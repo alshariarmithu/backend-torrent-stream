@@ -3,5 +3,7 @@ services:
     build: .
     ports:
       - "8081:8081"
+      - "6881-6891:6881-6891/tcp"
+      - "6881-6891:6881-6891/udp"
     shm_size: "1gb"
     env_file: .env
