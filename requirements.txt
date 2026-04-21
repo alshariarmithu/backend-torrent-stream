@@ -11,4 +11,5 @@ playwright>=1.53
 python-libtorrent>=2.0; python_version < "3.13"
 email-validator>=2.2
 uvicorn>=0.30
+websockets>=13.0
 python-dotenv>=0.19

@@ -12,8 +12,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt \
-    && python -c "import libtorrent; print('libtorrent ready')" \
+RUN pip install --no-cache-dir websockets -r requirements.txt \
+    && python -c "import libtorrent, websockets; print('libtorrent/websockets ready')" \
     && python -m playwright install --with-deps chromium
 
 COPY . .
