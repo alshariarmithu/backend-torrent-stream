@@ -42,6 +42,8 @@ MEDIA_EXTS = VIDEO_EXTS | AUDIO_EXTS
 SUBTITLE_EXTS = {".srt", ".vtt", ".ass", ".ssa", ".sub", ".idx"}
 PREFERRED_VIDEO_EXTS = (".mp4", ".m4v", ".mov", ".webm", ".mkv", ".avi", ".ts", ".mpg", ".mpeg")
 PREFERRED_AUDIO_EXTS = (".m4a", ".mp3", ".aac", ".opus", ".ogg", ".oga", ".wav", ".flac", ".weba")
+BROWSER_DIRECT_VIDEO_EXTS = {".mp4", ".m4v", ".mov", ".webm", ".ogv"}
+BROWSER_DIRECT_AUDIO_EXTS = {".mp3", ".m4a", ".aac", ".wav", ".ogg", ".oga", ".opus", ".weba"}
 
 
 def _env_int(name: str, default: int) -> int:
@@ -63,6 +65,14 @@ HLS_READY_MIN_BYTES = _env_int("HLS_READY_MIN_BYTES", 24 * 1024 * 1024)
 HLS_READY_TIMEOUT_SEC = _env_int("HLS_READY_TIMEOUT", 120)
 HLS_SEGMENT_TIME_SEC = _env_int("HLS_SEGMENT_TIME", 6)
 HLS_LIST_SIZE = _env_int("HLS_LIST_SIZE", 8)
+HLS_PROBE_SIZE_BYTES = _env_int("HLS_PROBE_SIZE_BYTES", 64 * 1024 * 1024)
+HLS_ANALYZE_DURATION_US = _env_int("HLS_ANALYZE_DURATION_US", 30_000_000)
+HLS_AUDIO_PROBE_MIN_BYTES = _env_int("HLS_AUDIO_PROBE_MIN_BYTES", 64 * 1024 * 1024)
+STREAM_PROGRESS_WAIT_TIMEOUT_SEC = _env_int("STREAM_PROGRESS_WAIT_TIMEOUT", 30)
+STREAM_PROGRESS_POLL_INTERVAL_MS = _env_int("STREAM_PROGRESS_POLL_INTERVAL_MS", 250)
+STREAM_RANGE_READY_MIN_BYTES = _env_int("STREAM_RANGE_READY_MIN_BYTES", 512 * 1024)
+STREAM_RANGE_PRIORITY_WINDOW_BYTES = _env_int("STREAM_RANGE_PRIORITY_WINDOW_BYTES", 16 * 1024 * 1024)
+STREAM_RANGE_PREFETCH_WINDOW_BYTES = _env_int("STREAM_RANGE_PREFETCH_WINDOW_BYTES", 8 * 1024 * 1024)
 STREAM_IDLE_TIMEOUT_SEC = _env_int("STREAM_IDLE_TIMEOUT", 45)
 STREAM_PREPARING_IDLE_TIMEOUT_SEC = _env_int("STREAM_PREPARING_IDLE_TIMEOUT", 20)
 STREAM_REAPER_INTERVAL_SEC = _env_int("STREAM_REAPER_INTERVAL", 10)
@@ -303,9 +313,15 @@ def _add_or_get(magnet: str, torrent_hash: str):
             }
 
         handle = ses.add_torrent(params)
-        handle.set_sequential_download(True)
-        # priority 7 = highest
-        handle.set_priority(7)
+        try:
+            handle.set_sequential_download(False)
+        except Exception:
+            pass
+        try:
+            # Keep overall torrent priority modest; the active playback window is raised separately.
+            handle.set_priority(1)
+        except Exception:
+            pass
         _sessions[torrent_hash] = handle
         _session_activity[torrent_hash] = {
             "active_clients": 0,
@@ -334,63 +350,166 @@ def _wait_metadata(handle, timeout: int = 60, label: str = "") -> bool:
     return False
 
 
-def _downloaded_file_bytes(handle, file_index: Optional[int]) -> int:
-    """Return downloaded bytes for a file, avoiding sparse-file false positives."""
-    if file_index is None:
-        return 0
+def _file_piece_context(handle, media: dict) -> Optional[dict]:
+    file_index = media.get("index")
+    file_size = int(media.get("size") or 0)
+    if file_index is None or file_size <= 0 or not handle.has_metadata():
+        return None
 
     try:
-        progress = handle.file_progress()
-        if 0 <= file_index < len(progress):
-            return max(0, int(progress[file_index]))
+        ti = handle.get_torrent_info()
+        first_map = ti.map_file(file_index, 0, 1)
+        if file_size == 1:
+            last_map = first_map
+        else:
+            last_map = ti.map_file(file_index, file_size - 1, 1)
     except Exception:
-        pass
+        return None
 
-    return 0
+    piece_length = int(ti.piece_length())
+    first_piece = int(first_map.piece)
+    last_piece = int(last_map.piece)
+    file_absolute_start = first_piece * piece_length + int(first_map.start)
+
+    return {
+        "ti": ti,
+        "file_index": file_index,
+        "file_size": file_size,
+        "piece_length": piece_length,
+        "first_piece": first_piece,
+        "last_piece": last_piece,
+        "file_absolute_start": file_absolute_start,
+    }
 
 
-def _allocated_file_bytes(media_path: Path) -> int:
-    """Best-effort fallback for environments where file_progress() is unavailable."""
-    try:
-        stat_result = media_path.stat()
-    except FileNotFoundError:
+def _contiguous_bytes_from_offset(handle, media: dict, start_offset: int = 0) -> int:
+    """
+    Return bytes available contiguously starting at the requested file offset.
+
+    This is stricter than file_progress(): it only counts pieces that are present without gaps
+    from the specific byte range the client wants to read.
+    """
+    context = _file_piece_context(handle, media)
+    if not context:
         return 0
 
-    blocks = getattr(stat_result, "st_blocks", 0)
-    if blocks:
-        return max(0, int(blocks) * 512)
+    file_size = int(context["file_size"])
+    if start_offset < 0 or start_offset >= file_size:
+        return 0
+
+    ti = context["ti"]
+    piece_length = int(context["piece_length"])
+    last_piece = int(context["last_piece"])
+    file_absolute_start = int(context["file_absolute_start"])
+
+    try:
+        start_map = ti.map_file(int(context["file_index"]), start_offset, 1)
+    except Exception:
+        return 0
+
+    start_piece = int(start_map.piece)
+    contiguous = 0
+
+    for piece in range(start_piece, last_piece + 1):
+        try:
+            if not handle.have_piece(piece):
+                break
+            piece_size = int(ti.piece_size(piece))
+        except Exception:
+            break
+
+        piece_start = piece * piece_length
+        piece_file_offset_start = max(0, piece_start - file_absolute_start)
+        piece_file_offset_end = min(file_size, piece_start + piece_size - file_absolute_start)
+        overlap_start = max(start_offset, piece_file_offset_start)
+        overlap_end = piece_file_offset_end
+        overlap = max(0, overlap_end - overlap_start)
+
+        if overlap <= 0:
+            continue
+        contiguous += overlap
+
+    return min(contiguous, file_size - start_offset)
+
+
+def _prioritize_media_range(
+    handle,
+    media: dict,
+    start_offset: int,
+    window_bytes: int = STREAM_RANGE_PRIORITY_WINDOW_BYTES,
+    prefetch_window_bytes: int = STREAM_RANGE_PREFETCH_WINDOW_BYTES,
+) -> None:
+    context = _file_piece_context(handle, media)
+    if not context:
+        return
+
+    file_size = int(context["file_size"])
+    if start_offset < 0 or start_offset >= file_size:
+        return
+
+    end_offset = min(file_size - 1, start_offset + max(1, window_bytes) - 1)
+    ti = context["ti"]
+    file_index = int(context["file_index"])
+
+    try:
+        start_piece = int(ti.map_file(file_index, start_offset, 1).piece)
+        end_piece = int(ti.map_file(file_index, end_offset, 1).piece)
+        prefetch_end_offset = min(file_size - 1, end_offset + max(0, prefetch_window_bytes))
+        prefetch_end_piece = int(ti.map_file(file_index, prefetch_end_offset, 1).piece)
+    except Exception:
+        return
+
+    for piece in range(start_piece, end_piece + 1):
+        try:
+            handle.piece_priority(piece, 7)
+        except Exception:
+            continue
+
+    for piece in range(end_piece + 1, prefetch_end_piece + 1):
+        try:
+            if handle.piece_priority(piece) < 6:
+                handle.piece_priority(piece, 6)
+        except Exception:
+            continue
+
+
+def _media_available_bytes(handle, media: dict, start_offset: int = 0) -> int:
+    contiguous = _contiguous_bytes_from_offset(handle, media, start_offset)
+    if contiguous > 0:
+        return contiguous
     return 0
 
 
-def _media_available_bytes(handle, media: dict) -> int:
-    downloaded = _downloaded_file_bytes(handle, media.get("index"))
-    if downloaded > 0:
-        return min(downloaded, int(media.get("size") or downloaded))
-
-    fallback_path = Path(media["full_path"])
-    allocated = _allocated_file_bytes(fallback_path)
-    if allocated > 0:
-        return min(allocated, int(media.get("size") or allocated))
-
-    return 0
-
-
-def _wait_file_ready(handle, media: dict, timeout: int = 60, min_bytes: int = 1, label: str = "") -> int:
+def _wait_file_ready(
+    handle,
+    media: dict,
+    timeout: int = 60,
+    min_bytes: int = 1,
+    start_offset: int = 0,
+    label: str = "",
+) -> int:
     deadline = time.time() + timeout
     last_log = 0.0
 
     while time.time() < deadline:
-        size = _media_available_bytes(handle, media)
+        size = _media_available_bytes(handle, media, start_offset=start_offset)
 
         if size >= min_bytes:
             if label:
-                logger.info("%s file ready bytes=%s", label, size)
+                logger.info("%s file ready bytes=%s offset=%s", label, size, start_offset)
             return size
 
         now = time.time()
         if label and now - last_log >= 5:
             remaining = max(0, int(deadline - now))
-            logger.info("%s waiting for file bytes (%s/%s, %ss remaining)", label, size, min_bytes, remaining)
+            logger.info(
+                "%s waiting for file bytes (%s/%s from offset=%s, %ss remaining)",
+                label,
+                size,
+                min_bytes,
+                start_offset,
+                remaining,
+            )
             last_log = now
 
         time.sleep(0.5)
@@ -408,7 +527,7 @@ def _hls_tools_available() -> bool:
     return bool(_ffmpeg_binary("ffmpeg") and _ffmpeg_binary("ffprobe"))
 
 
-def _probe_media_ready(media_path: Path) -> tuple[bool, str]:
+def _probe_media_ready(media_path: Path) -> tuple[bool, dict | str]:
     ffprobe_bin = _ffmpeg_binary("ffprobe")
     if not ffprobe_bin:
         return False, "ffprobe not installed"
@@ -419,8 +538,11 @@ def _probe_media_ready(media_path: Path) -> tuple[bool, str]:
                 ffprobe_bin,
                 "-v",
                 "error",
-                "-show_entries",
-                "stream=index,codec_type,codec_name",
+                "-probesize",
+                str(HLS_PROBE_SIZE_BYTES),
+                "-analyzeduration",
+                str(HLS_ANALYZE_DURATION_US),
+                "-show_streams",
                 "-show_entries",
                 "format=duration",
                 "-of",
@@ -448,7 +570,16 @@ def _probe_media_ready(media_path: Path) -> tuple[bool, str]:
     if not streams:
         return False, "ffprobe found no media streams"
 
-    return True, ""
+    video_streams = [stream for stream in streams if stream.get("codec_type") == "video"]
+    audio_streams = [stream for stream in streams if stream.get("codec_type") == "audio"]
+
+    return True, {
+        "streams": streams,
+        "video_streams": video_streams,
+        "audio_streams": audio_streams,
+        "has_video": bool(video_streams),
+        "has_audio": bool(audio_streams),
+    }
 
 
 def _hls_session_dir(torrent_hash: str) -> Path:
@@ -490,15 +621,22 @@ def _stop_hls_session(session: Optional[dict]) -> None:
             logger.exception("failed to remove hls session dir %s", session_dir)
 
 
-def _ensure_hls_session(torrent_hash: str, media: dict) -> tuple[Optional[dict], Optional[str]]:
+def _ensure_hls_session(torrent_hash: str, media: dict, available_bytes: int) -> tuple[Optional[dict], Optional[str]]:
     ffmpeg_bin = _ffmpeg_binary("ffmpeg")
     if not ffmpeg_bin:
         return None, "ffmpeg not installed"
 
     media_path = Path(media["full_path"])
-    probe_ok, probe_error = _probe_media_ready(media_path)
+    probe_ok, probe_result = _probe_media_ready(media_path)
     if not probe_ok:
-        return None, probe_error or "media probe not ready"
+        return None, str(probe_result or "media probe not ready")
+
+    probe_info = probe_result if isinstance(probe_result, dict) else {}
+    if not probe_info.get("has_video"):
+        return None, "video stream not discoverable yet"
+
+    if media.get("kind") == "video" and not probe_info.get("has_audio") and available_bytes < HLS_AUDIO_PROBE_MIN_BYTES:
+        return None, "audio track not discoverable yet"
 
     with _hls_lock:
         session = _hls_sessions.get(torrent_hash)
@@ -525,6 +663,10 @@ def _ensure_hls_session(torrent_hash: str, media: dict) -> tuple[Optional[dict],
             "warning",
             "-nostdin",
             "-re",
+            "-probesize",
+            str(HLS_PROBE_SIZE_BYTES),
+            "-analyzeduration",
+            str(HLS_ANALYZE_DURATION_US),
             "-i",
             str(media_path),
             "-map",
@@ -640,6 +782,18 @@ def _best_video(handle) -> Optional[Path]:
     return Path(info["full_path"])
 
 
+def _prefer_direct_browser_playback(media: Optional[dict]) -> bool:
+    if not media:
+        return False
+    ext = str(media.get("ext") or "").lower()
+    kind = media.get("kind")
+    if kind == "video":
+        return ext in BROWSER_DIRECT_VIDEO_EXTS
+    if kind == "audio":
+        return ext in BROWSER_DIRECT_AUDIO_EXTS
+    return False
+
+
 def _best_video_info(handle) -> Optional[dict]:
     """Return metadata about the best playable media file in the torrent."""
     if not handle.has_metadata():
@@ -717,7 +871,7 @@ def _subtitle_tracks(handle) -> list[dict]:
 
 
 def _prioritize_files(handle, video_index: Optional[int], subtitle_indexes: list[int]) -> None:
-    """Prioritize selected video and subtitle files for faster startup."""
+    """Keep only the selected media/subtitles eligible for download; piece windows drive urgency."""
     if not handle.has_metadata():
         return
 
@@ -729,10 +883,10 @@ def _prioritize_files(handle, video_index: Optional[int], subtitle_indexes: list
 
     priorities = [0] * file_count
     if video_index is not None and 0 <= video_index < file_count:
-        priorities[video_index] = 7
+        priorities[video_index] = 1
     for idx in subtitle_indexes:
-        if 0 <= idx < file_count and priorities[idx] < 5:
-            priorities[idx] = 5
+        if 0 <= idx < file_count and priorities[idx] < 1:
+            priorities[idx] = 1
 
     try:
         handle.prioritize_files(priorities)
@@ -944,27 +1098,9 @@ async def stream_torrent(
             len(subtitle_tracks),
         )
 
-        ready_bytes = _wait_file_ready(
-            handle,
-            media,
-            timeout=FILE_WAIT_TIMEOUT_SEC,
-            min_bytes=STREAM_READY_MIN_BYTES,
-            label=f"http stream hash={torrent_hash}",
-        )
-        if ready_bytes <= 0:
-            logger.warning("http stream file not ready hash=%s file=%s", torrent_hash, media_path.name)
-            raise HTTPException(504, f"Media file not yet ready: {media_path.name}")
-
         total_size   = int(media["size"])
         content_type = mimetypes.guess_type(str(media_path))[0] or ("video/mp4" if media["kind"] == "video" else "audio/mpeg")
         chunk_size   = max(16 * 1024, STREAM_CHUNK_SIZE)
-        logger.info(
-            "http stream chunk size hash=%s chunk_size=%s available_bytes=%s total_size=%s",
-            torrent_hash,
-            chunk_size,
-            ready_bytes,
-            total_size,
-        )
 
         # ── Range parsing ──────────────────────────────────────────────────────
         start, requested_end = 0, total_size - 1
@@ -981,50 +1117,104 @@ async def stream_torrent(
                 logger.warning("http stream malformed range ignored hash=%s range=%s", torrent_hash, range_header)
                 pass
 
-        if start >= ready_bytes:
-            headers = {
-                "Accept-Ranges": "bytes",
-                "Content-Range": f"bytes */{total_size}",
-                "Retry-After": "2",
-                "Cache-Control": "no-cache",
-            }
-            raise HTTPException(status_code=416, detail="Requested range not downloaded yet", headers=headers)
-
         start = max(0, min(start, total_size - 1))
-        available_end = max(start, min(ready_bytes - 1, total_size - 1))
-        end = max(start, min(requested_end, available_end))
+        end = max(start, min(requested_end, total_size - 1))
         length = end - start + 1
+        _prioritize_media_range(handle, media, start)
+
+        ready_min_bytes = STREAM_RANGE_READY_MIN_BYTES if is_range else STREAM_READY_MIN_BYTES
+        ready_bytes = _wait_file_ready(
+            handle,
+            media,
+            timeout=FILE_WAIT_TIMEOUT_SEC,
+            min_bytes=min(ready_min_bytes, length),
+            start_offset=start,
+            label=f"http stream hash={torrent_hash}",
+        )
+        if ready_bytes <= 0:
+            logger.warning(
+                "http stream range not ready hash=%s file=%s start=%s length=%s",
+                torrent_hash,
+                media_path.name,
+                start,
+                length,
+            )
+            raise HTTPException(504, f"Requested media range not yet ready: {media_path.name}")
+
+        logger.info(
+            "http stream chunk size hash=%s chunk_size=%s start=%s ready_bytes=%s total_size=%s",
+            torrent_hash,
+            chunk_size,
+            start,
+            ready_bytes,
+            total_size,
+        )
 
         async def iterfile():
             try:
                 with open(media_path, "rb") as f:
-                    f.seek(start)
+                    current_offset = start
                     remaining = length
+                    last_progress_at = time.time()
                     while remaining > 0:
                         if await request.is_disconnected():
                             logger.info("http stream client disconnected hash=%s file=%s", torrent_hash, media_path.name)
                             break
-                        data = f.read(min(chunk_size, remaining))
+
+                        available_bytes = _media_available_bytes(handle, media, start_offset=current_offset)
+                        if available_bytes <= 0:
+                            _prioritize_media_range(handle, media, current_offset)
+                            if time.time() - last_progress_at >= STREAM_PROGRESS_WAIT_TIMEOUT_SEC:
+                                logger.warning(
+                                    "http stream stalled hash=%s file=%s offset=%s available=%s timeout=%s",
+                                    torrent_hash,
+                                    media_path.name,
+                                    current_offset,
+                                    available_bytes,
+                                    STREAM_PROGRESS_WAIT_TIMEOUT_SEC,
+                                )
+                                break
+                            await asyncio.sleep(max(0.05, STREAM_PROGRESS_POLL_INTERVAL_MS / 1000))
+                            continue
+
+                        readable = min(chunk_size, remaining, available_bytes)
+                        f.seek(current_offset)
+                        data = f.read(readable)
                         if not data:
-                            break
+                            if time.time() - last_progress_at >= STREAM_PROGRESS_WAIT_TIMEOUT_SEC:
+                                logger.warning(
+                                    "http stream empty read stall hash=%s file=%s offset=%s available=%s",
+                                    torrent_hash,
+                                    media_path.name,
+                                    current_offset,
+                                    available_bytes,
+                                )
+                                break
+                            await asyncio.sleep(max(0.05, STREAM_PROGRESS_POLL_INTERVAL_MS / 1000))
+                            continue
+
+                        last_progress_at = time.time()
                         _touch_session_activity(torrent_hash)
                         yield data
+                        current_offset += len(data)
                         remaining -= len(data)
             finally:
                 _release_session_client(torrent_hash, "http-stream")
 
         headers = {
-            "Content-Range":       f"bytes {start}-{end}/{total_size}",
             "Accept-Ranges":       "bytes",
             "Content-Length":      str(length),
             "Content-Disposition": f'inline; filename="{media_path.name}"',
             "Cache-Control":       "no-cache",
-            "X-Available-Bytes":   str(ready_bytes),
+            "X-Initial-Available-Bytes": str(ready_bytes),
             "X-Total-Bytes":       str(total_size),
         }
 
+        if is_range:
+            headers["Content-Range"] = f"bytes {start}-{end}/{total_size}"
+
         response_started = True
-        status_code = 206 if is_range or ready_bytes < total_size else 200
+        status_code = 206 if is_range else 200
         return StreamingResponse(
             iterfile(),
             status_code=status_code,
@@ -1086,7 +1276,7 @@ async def stream_hls_playlist(
         if ready_bytes <= 0:
             raise HTTPException(504, "Video bytes are not ready for HLS transcoding yet")
 
-        session, error = _ensure_hls_session(torrent_hash, media)
+        session, error = _ensure_hls_session(torrent_hash, media, ready_bytes)
         if not session:
             raise HTTPException(503, f"HLS preparation still warming up: {error}")
 
@@ -1360,7 +1550,9 @@ async def _stream_wait_ws_impl(websocket: WebSocket, torrent_hash: str):
                     _prioritize_files(handle, media.get("index"), [track["index"] for track in subtitle_tracks])
 
                     current_bytes = _media_available_bytes(handle, media)
-                    ready_target = HLS_READY_MIN_BYTES if media["kind"] == "video" and _hls_tools_available() else STREAM_READY_MIN_BYTES
+                    prefer_direct = _prefer_direct_browser_playback(media)
+                    should_prepare_hls = media["kind"] == "video" and _hls_tools_available() and not prefer_direct
+                    ready_target = HLS_READY_MIN_BYTES if should_prepare_hls else STREAM_READY_MIN_BYTES
 
                     if current_bytes < ready_target:
                         await websocket.send_json({
@@ -1375,7 +1567,7 @@ async def _stream_wait_ws_impl(websocket: WebSocket, torrent_hash: str):
                             "file_bytes": current_bytes,
                             "ready_bytes": ready_target,
                             "file_ready": False,
-                            "playback_mode": "hls" if media["kind"] == "video" and _hls_tools_available() else "direct",
+                            "playback_mode": "hls" if should_prepare_hls else "direct",
                             "selected_media": {
                                 "name": media["name"],
                                 "path": media["path"],
@@ -1398,16 +1590,19 @@ async def _stream_wait_ws_impl(websocket: WebSocket, torrent_hash: str):
                     base_url = _http_base_from_websocket(websocket)
                     stream_url = f"{base_url}/stream/{torrent_hash}?token={quote(token, safe='')}"
                     content_type = media["content_type"]
-                    hls_url = None
-                    if media["kind"] == "video" and _hls_tools_available():
+                    hls_url = (
+                        f"{base_url}/stream/hls/{torrent_hash}/stream.m3u8?token={quote(token, safe='')}"
+                        if media["kind"] == "video" and _hls_tools_available()
+                        else None
+                    )
+                    if should_prepare_hls:
                         hls_ready = False
                         hls_error = None
                         if time.time() - last_hls_attempt >= 2:
                             last_hls_attempt = time.time()
-                            session, hls_error = _ensure_hls_session(torrent_hash, media)
+                            session, hls_error = _ensure_hls_session(torrent_hash, media, current_bytes)
                             if session:
                                 hls_ready = True
-                                hls_url = f"{base_url}/stream/hls/{torrent_hash}/stream.m3u8?token={quote(token, safe='')}"
                         if not hls_ready:
                             await websocket.send_json({
                                 "type": "status",

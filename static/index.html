@@ -753,6 +753,10 @@
     let currentSelectedMedia = '';
     let currentContentType = '';
     let currentPlaybackMode = '';
+    let currentStreamUrl = '';
+    let currentHlsUrl = '';
+    let currentDirectFallbackAttempted = false;
+    let currentHlsFallbackAttempted = false;
     let streamSocket = null;
     let streamReady = false;
     let hlsPlayer = null;
@@ -955,11 +959,43 @@
       return streamVideo.canPlayType(mime) !== '';
     }
 
+    function isLikelyDirectPlayableVideo(mediaName, contentType) {
+      const ext = mediaExtension(mediaName);
+      if (!browserCanPlayMedia(mediaName, contentType)) return false;
+      return ['mp4', 'm4v', 'mov', 'webm', 'ogv'].includes(ext);
+    }
+
     function clearMediaSource() {
       destroyHlsPlayer();
       streamVideo.pause();
       streamVideo.removeAttribute('src');
       streamVideo.load();
+    }
+
+    function playDirectStream(url) {
+      clearMediaSource();
+      streamVideo.src = url;
+      streamVideo.load();
+      void streamVideo.play().catch(() => {});
+      currentPlaybackMode = 'direct';
+      return Promise.resolve('direct');
+    }
+
+    async function playAvailableHls(url) {
+      if (!url) {
+        throw new Error('No HLS fallback URL was returned');
+      }
+      if (browserCanPlayNativeHls()) {
+        await playWithNativeHls(url);
+        currentPlaybackMode = 'native-hls';
+        return;
+      }
+      if (browserCanUseHlsJs()) {
+        await playWithHlsJs(url);
+        currentPlaybackMode = 'hls.js';
+        return;
+      }
+      throw new Error('This browser cannot use HLS fallback');
     }
 
     function playWithNativeHls(url) {
@@ -1054,18 +1090,36 @@
     async function playSelectedMedia({ hlsUrl, streamUrl, selectedMedia, contentType, mediaKind }) {
       currentSelectedMedia = selectedMedia || '';
       currentContentType = contentType || '';
+      currentStreamUrl = streamUrl || '';
+      currentHlsUrl = hlsUrl || '';
+      currentDirectFallbackAttempted = false;
+      currentHlsFallbackAttempted = false;
+
+      const canDirectPlay = browserCanPlayMedia(selectedMedia, contentType);
+      const preferDirect = mediaKind === 'audio'
+        ? canDirectPlay
+        : isLikelyDirectPlayableVideo(selectedMedia, contentType);
+
+      if (preferDirect && streamUrl) {
+        await playDirectStream(streamUrl);
+        return;
+      }
 
       if (mediaKind === 'video' && hlsUrl) {
-        if (browserCanPlayNativeHls()) {
-          await playWithNativeHls(hlsUrl);
-          currentPlaybackMode = 'native-hls';
+        try {
+          await playAvailableHls(hlsUrl);
           return;
-        }
-
-        if (browserCanUseHlsJs()) {
-          await playWithHlsJs(hlsUrl);
-          currentPlaybackMode = 'hls.js';
-          return;
+        } catch (error) {
+          logClient('hls startup fallback', {
+            message: error instanceof Error ? error.message : String(error),
+            streamUrl,
+          });
+          if (streamUrl && canDirectPlay) {
+            currentDirectFallbackAttempted = true;
+            await playDirectStream(streamUrl);
+            return;
+          }
+          throw error;
         }
       }
 
@@ -1077,11 +1131,7 @@
         throw new Error(`Selected file ${selectedMedia}${contentType ? ` (${contentType})` : ''} is not playable in this browser and HLS is unavailable`);
       }
 
-      clearMediaSource();
-      streamVideo.src = streamUrl;
-      streamVideo.load();
-      void streamVideo.play().catch(() => {});
-      currentPlaybackMode = 'direct';
+      await playDirectStream(streamUrl);
     }
 
     function buildWsUrl(hash, token) {
@@ -1106,6 +1156,10 @@
       currentSelectedMedia = '';
       currentContentType = '';
       currentPlaybackMode = '';
+      currentStreamUrl = '';
+      currentHlsUrl = '';
+      currentDirectFallbackAttempted = false;
+      currentHlsFallbackAttempted = false;
       streamReady = false;
       closeStreamSocket();
       logClient('player reset');
@@ -1439,8 +1493,58 @@
         message: codeMap[mediaError.code] || String(mediaError.code),
         src: streamVideo.currentSrc || '',
       });
+
+      if (
+        currentPlaybackMode === 'direct' &&
+        currentHlsUrl &&
+        !currentHlsFallbackAttempted &&
+        (mediaError.code === 2 || mediaError.code === 3)
+      ) {
+        currentHlsFallbackAttempted = true;
+        playerMeta.textContent = 'Direct playback hit a decode/network error. Trying HLS fallback...';
+        setStage('Retrying', 'warning');
+        setConnection('HLS fallback', 'warning');
+        void playAvailableHls(currentHlsUrl)
+          .then(() => {
+            resultsMeta.textContent = `Recovered with HLS fallback for ${currentSelectedMedia}`;
+          })
+          .catch(error => {
+            logClient('hls fallback failed', {
+              message: error instanceof Error ? error.message : String(error),
+            });
+          });
+        return;
+      }
+
+      if (
+        currentPlaybackMode &&
+        currentPlaybackMode !== 'direct' &&
+        currentStreamUrl &&
+        !currentDirectFallbackAttempted &&
+        browserCanPlayMedia(currentSelectedMedia, currentContentType)
+      ) {
+        currentDirectFallbackAttempted = true;
+        playerMeta.textContent = 'HLS failed after startup. Falling back to direct playback...';
+        setStage('Retrying', 'warning');
+        setConnection('Fallback', 'warning');
+        void playDirectStream(currentStreamUrl)
+          .then(() => {
+            resultsMeta.textContent = `Recovered with direct playback for ${currentSelectedMedia}`;
+          })
+          .catch(error => {
+            logClient('direct fallback failed', {
+              message: error instanceof Error ? error.message : String(error),
+            });
+          });
+        return;
+      }
+
       const sourceHint = currentPlaybackMode && currentPlaybackMode !== 'direct'
         ? ' HLS playback failed after the stream started.'
+        : mediaError.code === 3
+          ? ` Direct playback hit a decode error while reading ${currentSelectedMedia}${currentContentType ? ` (${currentContentType})` : ''}.`
+          : mediaError.code === 2
+            ? ' The network stream stalled or broke during playback.'
         : currentSelectedMedia
           ? ` Selected file ${currentSelectedMedia}${currentContentType ? ` (${currentContentType})` : ''} is not playable in this browser.`
           : ' Try an MP4/MOV/WEBM/MP3/M4A/MKV source with active seeders.';
