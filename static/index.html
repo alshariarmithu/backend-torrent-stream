@@ -833,7 +833,7 @@
     }
 
     function buildWsUrl(hash, token) {
-      return `ws://${window.location.host}/stream/ws?hash=${encodeURIComponent(hash)}&token=${encodeURIComponent(token)}`;
+      return `wss://${window.location.host}/stream/ws?hash=${encodeURIComponent(hash)}&token=${encodeURIComponent(token)}`;
     }
 
     function closeStreamSocket() {
@@ -855,27 +855,10 @@
       setStage('Waiting', 'accent');
     }
 
-    function showPlainHttpWarning() {
-      const httpUrl = window.location.href.replace(/^https:/, 'http:');
-      setConnection('HTTPS blocked', 'danger');
-      setStage('Open HTTP page', 'danger');
-      playerMeta.textContent = 'This page is loaded over HTTPS, so the browser blocks plain ws:// WebSocket connections.';
-      resultsMeta.textContent = `Open the HTTP version to use ws://: ${httpUrl}`;
-      out.textContent = JSON.stringify({
-        error: 'HTTPS page cannot open ws://',
-        open_http_url: httpUrl,
-      }, null, 2);
-    }
-
     async function prepareAndPlay(hash, magnet, name) {
       const token = getStoredToken();
       if (!token) {
         alert('Login first or paste a token.');
-        return;
-      }
-
-      if (window.location.protocol === 'https:') {
-        showPlainHttpWarning();
         return;
       }
 
