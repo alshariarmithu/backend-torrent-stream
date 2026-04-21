@@ -3,99 +3,785 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>TorrentStream — UI</title>
+  <title>TorrentStream Demo Console</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet">
   <style>
-    body { font-family: system-ui, -apple-system, Arial, sans-serif; padding: 24px; max-width: 900px; margin: auto }
-    h1 { font-size: 1.4rem }
-    form { margin-bottom: 18px }
-    input, button, select { padding: 8px 10px; margin: 6px 0; width: 100%; box-sizing: border-box }
-    .row { display: flex; gap: 8px }
-    .row input { flex: 1 }
-    pre { background: #f6f8fa; padding: 12px; border-radius: 6px; overflow: auto }
-    .result-card { padding: 10px; border-bottom: 1px solid #eee }
-    .result-actions { display: flex; gap: 8px; align-items: center; margin-top: 8px }
-    .result-actions a { font-size: 0.9rem }
-    .result-actions button { width: auto; margin: 0 }
-    .muted { color: #666; font-size: 0.92rem }
-    #streamVideo { width: 100%; max-height: 460px; background: #000; border-radius: 10px; margin-top: 8px }
-    #playerMeta { margin-top: 8px; font-size: 0.92rem }
+    :root {
+      color-scheme: dark;
+      --bg: #07111f;
+      --panel: rgba(8, 18, 33, 0.76);
+      --panel-strong: rgba(8, 18, 33, 0.92);
+      --border: rgba(148, 163, 184, 0.18);
+      --text: #e5eefc;
+      --muted: #94a3b8;
+      --accent: #38bdf8;
+      --accent-2: #14b8a6;
+      --warning: #f59e0b;
+      --success: #34d399;
+      --danger: #fb7185;
+      --shadow: 0 24px 80px rgba(2, 8, 23, 0.45);
+      --radius: 24px;
+      --radius-sm: 16px;
+    }
+
+    * { box-sizing: border-box; }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: "Manrope", "Segoe UI", sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(circle at top left, rgba(56, 189, 248, 0.16), transparent 30%),
+        radial-gradient(circle at top right, rgba(20, 184, 166, 0.12), transparent 28%),
+        linear-gradient(180deg, #040814 0%, var(--bg) 35%, #050b16 100%);
+      overflow-x: hidden;
+    }
+
+    body::before,
+    body::after {
+      content: "";
+      position: fixed;
+      inset: auto;
+      width: 36rem;
+      height: 36rem;
+      border-radius: 50%;
+      filter: blur(80px);
+      opacity: 0.18;
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    body::before {
+      top: -10rem;
+      left: -12rem;
+      background: #0ea5e9;
+    }
+
+    body::after {
+      right: -12rem;
+      bottom: -14rem;
+      background: #14b8a6;
+    }
+
+    .shell {
+      position: relative;
+      z-index: 1;
+      width: min(1440px, calc(100vw - 32px));
+      margin: 0 auto;
+      padding: 24px 0 40px;
+    }
+
+    .hero {
+      display: grid;
+      grid-template-columns: minmax(0, 1.6fr) 320px;
+      gap: 20px;
+      align-items: stretch;
+      padding: 28px;
+      margin-bottom: 22px;
+      border: 1px solid var(--border);
+      border-radius: calc(var(--radius) + 4px);
+      background: linear-gradient(180deg, rgba(12, 20, 35, 0.84), rgba(8, 18, 33, 0.66));
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(18px);
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: rgba(56, 189, 248, 0.12);
+      color: #bfe9ff;
+      font-size: 0.8rem;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .hero h1 {
+      margin: 14px 0 12px;
+      font-family: "Space Grotesk", "Manrope", sans-serif;
+      font-size: clamp(2rem, 4vw, 4.1rem);
+      line-height: 0.98;
+      letter-spacing: -0.05em;
+      max-width: 14ch;
+    }
+
+    .hero p {
+      margin: 0;
+      max-width: 68ch;
+      color: var(--muted);
+      line-height: 1.7;
+      font-size: 1rem;
+    }
+
+    .hero-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-top: 18px;
+    }
+
+    .stats-row,
+    .chip-row,
+    .action-row,
+    .meta-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: center;
+    }
+
+    .stats-row {
+      margin-top: 20px;
+    }
+
+    .status-pill,
+    .chip,
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      border-radius: 999px;
+      font-size: 0.82rem;
+      font-weight: 700;
+      line-height: 1;
+      white-space: nowrap;
+    }
+
+    .status-pill {
+      padding: 10px 14px;
+      background: rgba(148, 163, 184, 0.12);
+      color: var(--muted);
+      border: 1px solid rgba(148, 163, 184, 0.15);
+    }
+
+    .status-pill[data-tone="success"] { color: #bbf7d0; background: rgba(52, 211, 153, 0.12); border-color: rgba(52, 211, 153, 0.18); }
+    .status-pill[data-tone="warning"] { color: #fde68a; background: rgba(245, 158, 11, 0.12); border-color: rgba(245, 158, 11, 0.18); }
+    .status-pill[data-tone="danger"] { color: #fecdd3; background: rgba(251, 113, 133, 0.12); border-color: rgba(251, 113, 133, 0.18); }
+    .status-pill[data-tone="accent"] { color: #cffafe; background: rgba(56, 189, 248, 0.12); border-color: rgba(56, 189, 248, 0.18); }
+
+    .chip {
+      padding: 8px 11px;
+      background: rgba(148, 163, 184, 0.08);
+      color: #c7d2fe;
+      border: 1px solid rgba(148, 163, 184, 0.12);
+    }
+
+    .chip[data-tone="accent"] { color: #d9f8ff; background: rgba(56, 189, 248, 0.12); border-color: rgba(56, 189, 248, 0.18); }
+    .chip[data-tone="success"] { color: #d1fae5; background: rgba(52, 211, 153, 0.12); border-color: rgba(52, 211, 153, 0.18); }
+    .chip[data-tone="warning"] { color: #fde68a; background: rgba(245, 158, 11, 0.12); border-color: rgba(245, 158, 11, 0.18); }
+
+    .hero-rail {
+      display: grid;
+      gap: 12px;
+      align-content: start;
+    }
+
+    .rail-card {
+      padding: 16px;
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--border);
+      background: linear-gradient(180deg, rgba(15, 23, 42, 0.9), rgba(8, 18, 33, 0.82));
+    }
+
+    .rail-card label {
+      display: block;
+      margin-bottom: 8px;
+      color: var(--muted);
+      font-size: 0.8rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr);
+      gap: 22px;
+      align-items: start;
+    }
+
+    .stack {
+      display: grid;
+      gap: 22px;
+    }
+
+    .panel {
+      position: relative;
+      overflow: hidden;
+      padding: 20px;
+      border-radius: var(--radius);
+      border: 1px solid var(--border);
+      background: linear-gradient(180deg, rgba(12, 20, 35, 0.82), rgba(8, 18, 33, 0.7));
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(18px);
+    }
+
+    .panel::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(120deg, rgba(56, 189, 248, 0.06), transparent 38%, rgba(20, 184, 166, 0.04));
+      pointer-events: none;
+    }
+
+    .panel > * {
+      position: relative;
+      z-index: 1;
+    }
+
+    .panel-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 14px;
+      align-items: start;
+      margin-bottom: 16px;
+    }
+
+    .panel-head h2 {
+      margin: 0;
+      font-family: "Space Grotesk", "Manrope", sans-serif;
+      font-size: 1.1rem;
+      letter-spacing: -0.03em;
+    }
+
+    .panel-head p {
+      margin: 6px 0 0;
+      color: var(--muted);
+      line-height: 1.6;
+      font-size: 0.92rem;
+    }
+
+    .panel-subtle {
+      color: var(--muted);
+      font-size: 0.9rem;
+      line-height: 1.6;
+    }
+
+    .auth-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+      margin-bottom: 16px;
+    }
+
+    .form-card {
+      padding: 16px;
+      border-radius: 18px;
+      background: rgba(15, 23, 42, 0.78);
+      border: 1px solid rgba(148, 163, 184, 0.14);
+    }
+
+    .form-card h3 {
+      margin: 0 0 6px;
+      font-size: 0.95rem;
+      letter-spacing: -0.02em;
+    }
+
+    .form-card p {
+      margin: 0 0 14px;
+      color: var(--muted);
+      font-size: 0.86rem;
+      line-height: 1.5;
+    }
+
+    .form-grid {
+      display: grid;
+      gap: 10px;
+    }
+
+    .input,
+    .select,
+    .btn {
+      width: 100%;
+      border: 0;
+      outline: none;
+      font: inherit;
+      border-radius: 14px;
+      transition: transform 160ms ease, border-color 160ms ease, background 160ms ease, box-shadow 160ms ease;
+    }
+
+    .input,
+    .select {
+      padding: 13px 14px;
+      color: var(--text);
+      background: rgba(2, 6, 23, 0.58);
+      border: 1px solid rgba(148, 163, 184, 0.16);
+    }
+
+    .input::placeholder { color: #64748b; }
+
+    .input:focus,
+    .select:focus {
+      border-color: rgba(56, 189, 248, 0.55);
+      box-shadow: 0 0 0 4px rgba(56, 189, 248, 0.12);
+    }
+
+    .field-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1.6fr) minmax(180px, 240px);
+      gap: 12px;
+    }
+
+    .field-row--compact {
+      grid-template-columns: minmax(0, 1fr) 180px;
+    }
+
+    .token-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto auto;
+      gap: 10px;
+      align-items: center;
+      margin-top: 14px;
+    }
+
+    .btn {
+      cursor: pointer;
+      padding: 13px 16px;
+      color: white;
+      font-weight: 700;
+      letter-spacing: -0.01em;
+      background: linear-gradient(135deg, #0ea5e9, #14b8a6);
+      box-shadow: 0 14px 30px rgba(14, 165, 233, 0.18);
+    }
+
+    .btn:hover { transform: translateY(-1px); }
+    .btn:active { transform: translateY(0); }
+
+    .btn--ghost {
+      background: rgba(148, 163, 184, 0.08);
+      color: #dbeafe;
+      border: 1px solid rgba(148, 163, 184, 0.14);
+      box-shadow: none;
+    }
+
+    .btn--small {
+      width: auto;
+      padding: 10px 14px;
+      border-radius: 12px;
+      white-space: nowrap;
+    }
+
+    .button-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 14px;
+    }
+
+    .search-top {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+      margin-bottom: 14px;
+    }
+
+    .search-top .panel-subtle {
+      max-width: 65ch;
+      margin: 0;
+    }
+
+    .results-meta {
+      min-height: 24px;
+      font-size: 0.9rem;
+      color: var(--muted);
+    }
+
+    .results-grid {
+      display: grid;
+      gap: 14px;
+      margin-top: 14px;
+    }
+
+    .result-card {
+      display: grid;
+      grid-template-columns: 128px minmax(0, 1fr);
+      gap: 14px;
+      padding: 14px;
+      border-radius: 18px;
+      background: rgba(15, 23, 42, 0.82);
+      border: 1px solid rgba(148, 163, 184, 0.14);
+    }
+
+    .poster {
+      position: relative;
+      min-height: 176px;
+      border-radius: 14px;
+      overflow: hidden;
+      background: linear-gradient(180deg, rgba(14, 165, 233, 0.25), rgba(20, 184, 166, 0.15));
+      border: 1px solid rgba(148, 163, 184, 0.12);
+      display: grid;
+      place-items: center;
+      color: #dbeafe;
+      font-family: "Space Grotesk", sans-serif;
+      font-size: 1.2rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .poster img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+
+    .result-body {
+      display: grid;
+      gap: 12px;
+      align-content: start;
+    }
+
+    .result-title {
+      margin: 0;
+      font-size: 1.02rem;
+      line-height: 1.35;
+      letter-spacing: -0.02em;
+    }
+
+    .result-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 0.88rem;
+    }
+
+    .result-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: center;
+    }
+
+    .link {
+      color: #9ae6ff;
+      font-weight: 700;
+      text-decoration: none;
+    }
+
+    .link:hover { text-decoration: underline; }
+
+    .stream-wrap {
+      display: grid;
+      gap: 14px;
+    }
+
+    #streamVideo {
+      width: 100%;
+      aspect-ratio: 16 / 9;
+      background: linear-gradient(180deg, rgba(2, 6, 23, 0.92), rgba(15, 23, 42, 0.76));
+      border-radius: 20px;
+      border: 1px solid rgba(148, 163, 184, 0.16);
+      overflow: hidden;
+    }
+
+    .meter {
+      display: grid;
+      gap: 10px;
+    }
+
+    .meter__track {
+      width: 100%;
+      height: 10px;
+      border-radius: 999px;
+      background: rgba(148, 163, 184, 0.12);
+      overflow: hidden;
+    }
+
+    .meter__track span {
+      display: block;
+      width: 0%;
+      height: 100%;
+      border-radius: inherit;
+      background: linear-gradient(90deg, #0ea5e9, #14b8a6);
+      transition: width 180ms ease;
+    }
+
+    .meter__labels {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      color: var(--muted);
+      font-size: 0.9rem;
+      line-height: 1.5;
+    }
+
+    #playerMeta {
+      min-height: 3.2em;
+    }
+
+    #out {
+      margin: 0;
+      min-height: 240px;
+      max-height: 460px;
+      overflow: auto;
+      padding: 16px;
+      border-radius: 18px;
+      background: #020617;
+      color: #dbeafe;
+      border: 1px solid rgba(148, 163, 184, 0.14);
+      font-size: 0.88rem;
+      line-height: 1.6;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+
+    .footer {
+      margin-top: 20px;
+      padding: 10px 2px 0;
+      color: var(--muted);
+      font-size: 0.85rem;
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .divider {
+      height: 1px;
+      background: linear-gradient(90deg, transparent, rgba(148, 163, 184, 0.2), transparent);
+      margin: 14px 0;
+    }
+
+    @media (max-width: 1080px) {
+      .hero,
+      .layout,
+      .auth-grid,
+      .field-row,
+      .field-row--compact,
+      .result-card {
+        grid-template-columns: 1fr;
+      }
+
+      .hero { grid-template-columns: 1fr; }
+      .token-row { grid-template-columns: 1fr; }
+      .result-card { gap: 12px; }
+      .poster { min-height: 220px; }
+    }
+
+    @media (max-width: 640px) {
+      .shell { width: min(100vw - 18px, 1440px); padding-top: 12px; }
+      .hero, .panel { padding: 16px; border-radius: 20px; }
+      .hero h1 { max-width: 100%; }
+      .panel-head { flex-direction: column; }
+      .meter__labels { flex-direction: column; }
+      .result-actions { flex-direction: column; align-items: stretch; }
+      .btn--small { width: 100%; }
+    }
   </style>
 </head>
 <body>
-  <h1>TorrentStream — Basic UI</h1>
-
-  <section>
-    <h2>Register</h2>
-    <form id="registerForm">
-      <input id="regEmail" type="email" placeholder="Email" required />
-      <input id="regPassword" type="password" placeholder="Password (min 8 chars)" required />
-      <button type="submit">Register</button>
-    </form>
-  </section>
-
-  <section>
-    <h2>Login</h2>
-    <form id="loginForm">
-      <input id="loginEmail" type="email" placeholder="Email" required />
-      <input id="loginPassword" type="password" placeholder="Password" required />
-      <button type="submit">Login</button>
-    </form>
-  </section>
-
-  <section>
-    <h2>Auth Token</h2>
-    <div style="display:flex;gap:8px;align-items:center">
-      <input id="tokenInput" type="text" placeholder="Paste token here or use login" style="flex:1" />
-      <button id="saveToken">Save</button>
-      <button id="clearToken">Clear</button>
-    </div>
-    <p>Current token: <code id="currentToken">(none)</code></p>
-  </section>
-
-  <section>
-    <h2>Search</h2>
-    <form id="searchForm">
-      <div class="row">
-        <input id="searchQuery" type="search" placeholder="Search query" required />
-        <select id="searchCategory">
-          <option value="all">All</option>
-          <option value="movies">Movies</option>
-          <option value="tv">TV</option>
-          <option value="4k">4K</option>
-          <option value="music">Music</option>
-          <option value="games">Games</option>
-          <option value="apps">Apps</option>
-        </select>
+  <div class="shell">
+    <header class="hero">
+      <div>
+        <span class="eyebrow">TorrentStream demo console</span>
+        <h1>Prepare torrents, watch live stream status, and play the video in-browser.</h1>
+        <p>
+          Search results feed the websocket prep loop, the server selects the best video file and subtitle tracks,
+          and the browser player starts only when the stream is ready.
+        </p>
+        <div class="stats-row">
+          <span class="chip" data-tone="accent">WebSocket prep</span>
+          <span class="chip" data-tone="success">HTTP range streaming</span>
+          <span class="chip" data-tone="warning">Subtitle scan</span>
+        </div>
+        <div class="hero-actions">
+          <a class="btn btn--small" href="#searchCard">Jump to search</a>
+          <button class="btn btn--ghost btn--small" id="clearPlayerHero" type="button">Clear player</button>
+        </div>
       </div>
-      <button type="submit">Search</button>
-    </form>
-    <div id="results"></div>
-  </section>
 
-  <section>
-    <h2>Stream Player Test</h2>
-    <p class="muted">Click <strong>Prepare &amp; Play</strong> on a search result. Server will load torrent metadata, pick best video, scan subtitles, and return a stream link.</p>
-    <video id="streamVideo" controls playsinline></video>
-    <div id="playerMeta" class="muted">No stream loaded yet.</div>
-  </section>
+      <div class="hero-rail">
+        <div class="rail-card">
+          <label>Connection</label>
+          <div id="connectionChip" class="status-pill" data-tone="accent">Idle</div>
+        </div>
+        <div class="rail-card">
+          <label>Token</label>
+          <div id="tokenSummary" class="status-pill" data-tone="warning">No token</div>
+        </div>
+        <div class="rail-card">
+          <label>Playback stage</label>
+          <div id="stageChip" class="status-pill" data-tone="accent">Waiting</div>
+        </div>
+      </div>
+    </header>
 
-  <section>
-    <h2>Response</h2>
-    <pre id="out">No requests yet.</pre>
-  </section>
+    <main class="layout">
+      <section class="stack">
+        <article class="panel" id="authCard">
+          <div class="panel-head">
+            <div>
+              <h2>Authentication</h2>
+              <p>Login or register, then reuse the token for search, websocket prep, and stream playback.</p>
+            </div>
+            <div class="status-pill" id="authState" data-tone="accent">Ready</div>
+          </div>
+
+          <div class="auth-grid">
+            <form id="registerForm" class="form-card">
+              <h3>Create account</h3>
+              <p>Generate a token if you do not already have one.</p>
+              <div class="form-grid">
+                <input class="input" id="regEmail" type="email" placeholder="Email" required />
+                <input class="input" id="regPassword" type="password" placeholder="Password (min 8 chars)" required />
+                <button class="btn" type="submit">Register</button>
+              </div>
+            </form>
+
+            <form id="loginForm" class="form-card">
+              <h3>Login</h3>
+              <p>Use your existing credentials to start streaming.</p>
+              <div class="form-grid">
+                <input class="input" id="loginEmail" type="email" placeholder="Email" required />
+                <input class="input" id="loginPassword" type="password" placeholder="Password" required />
+                <button class="btn" type="submit">Login</button>
+              </div>
+            </form>
+          </div>
+
+          <div class="divider"></div>
+
+          <div>
+            <div class="panel-subtle" style="margin-bottom: 10px;">Auth token</div>
+            <div class="token-row">
+              <input class="input" id="tokenInput" type="text" placeholder="Paste token here or use login" />
+              <button id="saveToken" class="btn btn--small" type="button">Save</button>
+              <button id="clearToken" class="btn btn--ghost btn--small" type="button">Clear</button>
+            </div>
+            <div class="meta-row" style="margin-top: 10px;">
+              <span class="chip" id="currentToken">(none)</span>
+            </div>
+          </div>
+        </article>
+
+        <article class="panel" id="searchCard">
+          <div class="search-top">
+            <div>
+              <h2 style="margin:0; font-family:'Space Grotesk', sans-serif; letter-spacing:-0.03em;">Search library</h2>
+              <p class="panel-subtle">Pick a result, then prepare and play it through the websocket flow.</p>
+            </div>
+            <div id="resultsMeta" class="results-meta">Ready to search.</div>
+          </div>
+
+          <form id="searchForm">
+            <div class="field-row field-row--compact">
+              <input class="input" id="searchQuery" type="search" placeholder="Search title, genre, or keyword" required />
+              <select class="select" id="searchCategory">
+                <option value="all">All</option>
+                <option value="movies">Movies</option>
+                <option value="tv">TV</option>
+                <option value="4k">4K</option>
+                <option value="music">Music</option>
+                <option value="games">Games</option>
+                <option value="apps">Apps</option>
+                <option value="audio">Audio</option>
+                <option value="video">Video</option>
+                <option value="other">Other</option>
+              </select>
+            </div>
+            <div class="button-row">
+              <button class="btn" type="submit">Search torrents</button>
+              <button class="btn btn--ghost" type="button" id="searchExample">Load example query</button>
+            </div>
+          </form>
+
+          <div id="results" class="results-grid" aria-live="polite"></div>
+        </article>
+      </section>
+
+      <aside class="stack">
+        <article class="panel" id="playerCard">
+          <div class="panel-head">
+            <div>
+              <h2>Stream player</h2>
+              <p>Browser playback starts when the server sends a ready event over websocket.</p>
+            </div>
+            <button class="btn btn--ghost btn--small" type="button" id="resetPlayer">Reset</button>
+          </div>
+
+          <div class="stream-wrap">
+            <video id="streamVideo" controls playsinline></video>
+            <div class="meter">
+              <div class="meter__track"><span id="progressFill"></span></div>
+              <div class="meter__labels">
+                <span id="playerMeta">No stream loaded yet.</span>
+                <span id="progressValue">0%</span>
+              </div>
+            </div>
+          </div>
+        </article>
+
+        <article class="panel" id="consoleCard">
+          <div class="panel-head">
+            <div>
+              <h2>Response console</h2>
+              <p>Inspect the latest auth, search, websocket, or stream payload.</p>
+            </div>
+            <div class="status-pill" data-tone="accent">Debug</div>
+          </div>
+          <pre id="out">No requests yet.</pre>
+        </article>
+      </aside>
+    </main>
+
+    <footer class="footer">
+      <span>Websocket prep + HTTP range playback</span>
+      <span>Open the backend UI, search a title, then hit Prepare &amp; Play.</span>
+    </footer>
+  </div>
 
   <script>
     const out = document.getElementById('out');
     const streamVideo = document.getElementById('streamVideo');
     const playerMeta = document.getElementById('playerMeta');
+    const progressFill = document.getElementById('progressFill');
+    const progressValue = document.getElementById('progressValue');
+    const connectionChip = document.getElementById('connectionChip');
+    const tokenSummary = document.getElementById('tokenSummary');
+    const stageChip = document.getElementById('stageChip');
+    const authState = document.getElementById('authState');
+    const resultsMeta = document.getElementById('resultsMeta');
     let streamSocket = null;
+    let streamReady = false;
+    let fallbackStarted = false;
 
-    function getStoredToken(){
+    function setBadge(el, text, tone = 'accent') {
+      el.textContent = text;
+      el.dataset.tone = tone;
+    }
+
+    function setConnection(text, tone = 'accent') {
+      setBadge(connectionChip, text, tone);
+    }
+
+    function setStage(text, tone = 'accent') {
+      setBadge(stageChip, text, tone);
+    }
+
+    function setAuth(text, tone = 'accent') {
+      setBadge(authState, text, tone);
+    }
+
+    function updateProgress(percent) {
+      const clamped = Math.max(0, Math.min(100, percent));
+      progressFill.style.width = `${clamped}%`;
+      progressValue.textContent = `${clamped}%`;
+    }
+
+    function getStoredToken() {
       return localStorage.getItem('ts_token') || '';
     }
 
-    function setStoredToken(t){
-      if(t){
+    function setStoredToken(t) {
+      if (t) {
         localStorage.setItem('ts_token', t);
       } else {
         localStorage.removeItem('ts_token');
@@ -103,39 +789,42 @@
       renderToken();
     }
 
-    function renderToken(){
-      const t = getStoredToken();
-      document.getElementById('currentToken').textContent = t ? t.slice(0,8) + '...' : '(none)';
-      document.getElementById('tokenInput').value = t;
+    function renderToken() {
+      const token = getStoredToken();
+      document.getElementById('currentToken').textContent = token ? `${token.slice(0, 10)}…` : '(none)';
+      document.getElementById('tokenInput').value = token;
+      tokenSummary.textContent = token ? `Token active · ${token.slice(0, 10)}…` : 'No token';
+      tokenSummary.dataset.tone = token ? 'success' : 'warning';
+      setAuth(token ? 'Authenticated' : 'Unauthenticated', token ? 'success' : 'warning');
     }
 
-    async function postJson(path, body, includeAuth = false){
+    async function postJson(path, body, includeAuth = false) {
       const headers = { 'Content-Type': 'application/json' };
-      if(includeAuth){
-        const t = getStoredToken();
-        if(t) headers['Authorization'] = 'Bearer ' + t;
+      if (includeAuth) {
+        const token = getStoredToken();
+        if (token) headers.Authorization = 'Bearer ' + token;
       }
       const res = await fetch(path, {
         method: 'POST',
         headers,
-        body: JSON.stringify(body)
+        body: JSON.stringify(body),
       });
       const text = await res.text();
-      try{ return JSON.parse(text) }catch(e){ return text }
+      try { return JSON.parse(text); } catch (e) { return text; }
     }
 
-    async function getJson(path, includeAuth = false){
+    async function getJson(path, includeAuth = false) {
       const headers = {};
-      if(includeAuth){
-        const t = getStoredToken();
-        if(t) headers['Authorization'] = 'Bearer ' + t;
+      if (includeAuth) {
+        const token = getStoredToken();
+        if (token) headers.Authorization = 'Bearer ' + token;
       }
       const res = await fetch(path, { headers });
       const text = await res.text();
-      try{ return JSON.parse(text) }catch(e){ return text }
+      try { return JSON.parse(text); } catch (e) { return text; }
     }
 
-    function escapeHtml(value){
+    function escapeHtml(value) {
       return String(value ?? '')
         .replaceAll('&', '&amp;')
         .replaceAll('<', '&lt;')
@@ -144,34 +833,114 @@
         .replaceAll("'", '&#39;');
     }
 
-    function buildWsUrl(hash, magnet, token){
+    function buildWsUrl(hash, token) {
       const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
       return `${proto}://${window.location.host}/stream/ws?hash=${encodeURIComponent(hash)}&token=${encodeURIComponent(token)}`;
     }
 
-    function closeStreamSocket(){
-      if(streamSocket){
+    function buildHttpPlaybackUrl(streamPath, token) {
+      const url = new URL(streamPath, window.location.origin);
+      url.searchParams.set('token', token);
+      return url.toString();
+    }
+
+    function closeStreamSocket() {
+      if (streamSocket) {
         try { streamSocket.close(); } catch (_) {}
         streamSocket = null;
       }
     }
 
-    async function prepareAndPlay(hash, magnet, name){
+    function resetPlayer() {
+      closeStreamSocket();
+      streamReady = false;
+      fallbackStarted = false;
+      streamVideo.pause();
+      streamVideo.removeAttribute('src');
+      streamVideo.load();
+      playerMeta.textContent = 'No stream loaded yet.';
+      updateProgress(0);
+      setConnection('Idle', 'accent');
+      setStage('Waiting', 'accent');
+    }
+
+    async function openHttpFallback(hash, magnet, name, reason) {
+      if (fallbackStarted || streamReady) {
+        return false;
+      }
+
+      fallbackStarted = true;
+      closeStreamSocket();
+      setConnection('HTTP fallback', 'warning');
+      setStage('Preparing', 'warning');
+      playerMeta.textContent = `${reason} Falling back to HTTP prepare for ${name}…`;
+      resultsMeta.textContent = `Preparing ${name} via HTTP fallback…`;
+
+      try {
+        const token = getStoredToken();
+        const response = await fetch(`/stream/magnet/${encodeURIComponent(hash)}?magnet=${encodeURIComponent(magnet)}`, {
+          headers: {
+            Authorization: 'Bearer ' + token,
+          },
+        });
+
+        const text = await response.text();
+        let data;
+        try { data = JSON.parse(text); } catch (_) { data = text; }
+        out.textContent = JSON.stringify(data, null, 2);
+
+        if (!response.ok) {
+          throw new Error(data?.detail || data?.message || `HTTP ${response.status}`);
+        }
+
+        const playbackUrl = buildHttpPlaybackUrl(data.stream_path || `/stream/${hash}`, token);
+        const selectedVideo = data.selected_video?.name || '(unknown)';
+        const subtitleCount = Array.isArray(data.subtitle_tracks) ? data.subtitle_tracks.length : 0;
+        const prepared = Boolean(data.prepared);
+
+        streamReady = true;
+        updateProgress(prepared ? 100 : 35);
+        setConnection(prepared ? 'Streaming' : 'Preparing', prepared ? 'success' : 'warning');
+        setStage(prepared ? 'Ready' : 'Preparing', prepared ? 'success' : 'warning');
+        playerMeta.textContent = prepared
+          ? `Now playing: ${selectedVideo} | Subtitles: ${subtitleCount}`
+          : `HTTP fallback started for ${selectedVideo}. Buffering while torrent prepares…`;
+
+        streamVideo.src = playbackUrl;
+        streamVideo.load();
+        try { await streamVideo.play(); } catch (_) {}
+
+        resultsMeta.textContent = prepared ? `Streaming ${selectedVideo}` : `Preparing ${selectedVideo}`;
+        return true;
+      } catch (error) {
+        setConnection('Fallback failed', 'danger');
+        setStage('Failed', 'danger');
+        playerMeta.textContent = `HTTP fallback failed: ${error.message || error}`;
+        resultsMeta.textContent = 'Stream preparation failed.';
+        return false;
+      }
+    }
+
+    async function prepareAndPlay(hash, magnet, name) {
       const token = getStoredToken();
-      if(!token){
+      if (!token) {
         alert('Login first or paste a token.');
         return;
       }
 
-      closeStreamSocket();
-      streamVideo.removeAttribute('src');
-      streamVideo.load();
-
+      resetPlayer();
+      streamReady = false;
+      fallbackStarted = false;
       playerMeta.textContent = `Preparing stream for: ${name}`;
-      const wsUrl = buildWsUrl(hash, magnet, token);
+      setConnection('Connecting', 'warning');
+      setStage('Preparing', 'warning');
+      resultsMeta.textContent = `Preparing ${name}…`;
+
+      const wsUrl = buildWsUrl(hash, token);
       streamSocket = new WebSocket(wsUrl);
 
       streamSocket.onopen = () => {
+        setConnection('Socket open', 'success');
         playerMeta.textContent = 'Socket connected. Fetching nodes and metadata…';
         try {
           streamSocket.send(JSON.stringify({ hash, magnet }));
@@ -179,6 +948,10 @@
       };
 
       streamSocket.onmessage = async (event) => {
+        if (fallbackStarted) {
+          return;
+        }
+
         let message;
         try {
           message = JSON.parse(event.data);
@@ -188,69 +961,227 @@
 
         out.textContent = JSON.stringify(message, null, 2);
 
-        if(message.type === 'status'){
+        if (message.type === 'started') {
+          setConnection('Fetching', 'warning');
+          setStage('Started', 'accent');
+          if (message.message) playerMeta.textContent = message.message;
+          return;
+        }
+
+        if (message.type === 'status') {
           const pct = Math.round((message.progress || 0) * 100);
           const peers = message.num_peers || 0;
-          playerMeta.textContent = `Fetching nodes… ${pct}% | peers: ${peers}`;
+          updateProgress(pct);
+          setConnection(`Peers ${peers}`, peers > 0 ? 'success' : 'warning');
+          setStage(message.has_metadata ? 'Metadata ready' : 'Fetching metadata', message.has_metadata ? 'success' : 'warning');
+          playerMeta.textContent = message.has_metadata
+            ? 'Metadata fetched. Choosing stream…'
+            : `Fetching nodes… ${pct}% | peers: ${peers}`;
           return;
         }
 
-        if(message.type === 'ready'){
-          const playbackUrl = message.stream_url;
-          const selectedVideo = message.selected_video?.name || '(unknown)';
-          const subtitleCount = Array.isArray(message.subtitle_tracks) ? message.subtitle_tracks.length : 0;
-          playerMeta.textContent = `Now playing: ${selectedVideo} | Subtitles: ${subtitleCount} | URL: ${playbackUrl}`;
-
-          streamVideo.src = playbackUrl;
-          streamVideo.load();
-          try { await streamVideo.play(); } catch (_) {}
-          closeStreamSocket();
-          return;
-        }
-
-        if(message.type === 'error'){
-          playerMeta.textContent = `Prepare failed: ${message.message || 'Unknown error'}`;
-          closeStreamSocket();
-          return;
-        }
-
-        if(message.type === 'need_magnet'){
+        if (message.type === 'need_magnet') {
           try {
             streamSocket.send(JSON.stringify({ hash, magnet }));
           } catch (_) {}
           return;
         }
 
-        if(message.message){
+        if (message.type === 'ready') {
+          const playbackUrl = message.stream_url;
+          const selectedVideo = message.selected_video?.name || '(unknown)';
+          const subtitleCount = Array.isArray(message.subtitle_tracks) ? message.subtitle_tracks.length : 0;
+          streamReady = true;
+          updateProgress(100);
+          setConnection('Streaming', 'success');
+          setStage('Ready', 'success');
+          playerMeta.textContent = `Now playing: ${selectedVideo} | Subtitles: ${subtitleCount}`;
+
+          streamVideo.src = playbackUrl;
+          streamVideo.load();
+          try { await streamVideo.play(); } catch (_) {}
+          closeStreamSocket();
+          resultsMeta.textContent = `Streaming ${selectedVideo}`;
+          return;
+        }
+
+        if (message.type === 'error') {
+          setConnection('Error', 'danger');
+          setStage('Failed', 'danger');
+          playerMeta.textContent = `Prepare failed: ${message.message || 'Unknown error'}`;
+          resultsMeta.textContent = 'Stream preparation failed.';
+          closeStreamSocket();
+          return;
+        }
+
+        if (message.message) {
           playerMeta.textContent = message.message;
         }
       };
 
       streamSocket.onerror = () => {
+        setConnection('Socket error', 'danger');
         playerMeta.textContent = 'Socket error while preparing stream.';
+        if (!streamReady) {
+          void openHttpFallback(hash, magnet, name, 'WebSocket unavailable.');
+        }
       };
 
       streamSocket.onclose = (evt) => {
-        if(!streamVideo.currentSrc && evt.code !== 1000){
-          playerMeta.textContent = `Socket closed (${evt.code}). Try again.`;
+        if (!streamReady && !fallbackStarted && evt.code !== 1000) {
+          setConnection('Disconnected', 'danger');
+          playerMeta.textContent = `Socket closed (${evt.code}). Trying HTTP fallback…`;
+          resultsMeta.textContent = 'Socket disconnected before playback started.';
+          void openHttpFallback(hash, magnet, name, `WebSocket closed (${evt.code}).`);
         }
       };
     }
 
+    function renderResults(data) {
+      const container = document.getElementById('results');
+      if (!data || !data.data) {
+        container.innerHTML = '<div class="panel-subtle" style="padding: 10px 2px;">No results yet.</div>';
+        resultsMeta.textContent = 'No results found.';
+        return;
+      }
+
+      const items = data.data;
+      resultsMeta.textContent = `${items.length} result${items.length === 1 ? '' : 's'} loaded.`;
+
+      container.innerHTML = items.map((item, idx) => {
+        const poster = item.poster
+          ? `<div class="poster"><img src="${escapeHtml(item.poster)}" alt="" loading="lazy" onerror="this.style.display='none';this.parentElement.classList.add('poster-fallback');this.parentElement.textContent='TS';"></div>`
+          : `<div class="poster">TS</div>`;
+
+        return `
+          <article class="result-card">
+            ${poster}
+            <div class="result-body">
+              <div>
+                <h3 class="result-title">${escapeHtml(item.name)}</h3>
+                <div class="result-meta">
+                  <span class="tag">${escapeHtml(item.category || 'torrent')}</span>
+                  <span>${escapeHtml(item.size || 'Unknown size')}</span>
+                </div>
+              </div>
+
+              <div class="chip-row">
+                <span class="chip" data-tone="success">↑ ${escapeHtml(item.seeders)}</span>
+                <span class="chip" data-tone="warning">↓ ${escapeHtml(item.leechers)}</span>
+                <span class="chip">Hash ${escapeHtml((item.hash || '').slice(0, 8) || '—')}</span>
+              </div>
+
+              <div class="result-actions">
+                <button type="button" class="btn btn--small playBtn" data-idx="${idx}">Prepare &amp; Play</button>
+                <button type="button" class="btn btn--ghost btn--small copyBtn" data-magnet="${escapeHtml(item.magnet || '')}">Copy magnet</button>
+                <a class="link" href="${escapeHtml(item.magnet || '#')}" target="_blank" rel="noopener">Open magnet</a>
+              </div>
+            </div>
+          </article>`;
+      }).join('');
+
+      container.querySelectorAll('.playBtn').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          const idx = Number(btn.dataset.idx);
+          const item = items[idx];
+          if (!item) return;
+          await prepareAndPlay(item.hash, item.magnet, item.name);
+        });
+      });
+
+      container.querySelectorAll('.copyBtn').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          const magnet = btn.dataset.magnet || '';
+          if (!magnet) return;
+          try {
+            await navigator.clipboard.writeText(magnet);
+            resultsMeta.textContent = 'Magnet copied to clipboard.';
+          } catch (_) {
+            resultsMeta.textContent = 'Clipboard unavailable.';
+          }
+        });
+      });
+    }
+
+    document.getElementById('registerForm').addEventListener('submit', async e => {
+      e.preventDefault();
+      const email = document.getElementById('regEmail').value;
+      const password = document.getElementById('regPassword').value;
+      setAuth('Creating account…', 'warning');
+      const response = await postJson('/auth/register', { email, password });
+      out.textContent = JSON.stringify(response, null, 2);
+      if (response && response.access_token) {
+        setStoredToken(response.access_token);
+        setAuth('Registered', 'success');
+      } else {
+        setAuth('Register failed', 'danger');
+      }
+    });
+
+    document.getElementById('loginForm').addEventListener('submit', async e => {
+      e.preventDefault();
+      const email = document.getElementById('loginEmail').value;
+      const password = document.getElementById('loginPassword').value;
+      setAuth('Signing in…', 'warning');
+      const response = await postJson('/auth/login', { email, password });
+      out.textContent = JSON.stringify(response, null, 2);
+      if (response && response.access_token) {
+        setStoredToken(response.access_token);
+        setAuth('Logged in', 'success');
+      } else {
+        setAuth('Login failed', 'danger');
+      }
+    });
+
+    document.getElementById('saveToken').addEventListener('click', () => {
+      const value = document.getElementById('tokenInput').value.trim();
+      setStoredToken(value);
+    });
+
+    document.getElementById('clearToken').addEventListener('click', () => {
+      setStoredToken('');
+    });
+
+    document.getElementById('searchForm').addEventListener('submit', async e => {
+      e.preventDefault();
+      const query = document.getElementById('searchQuery').value.trim();
+      const category = document.getElementById('searchCategory').value;
+      if (!query) return;
+
+      resultsMeta.textContent = 'Searching…';
+      const path = `/search/?query=${encodeURIComponent(query)}&category=${encodeURIComponent(category)}`;
+      const response = await getJson(path, true);
+      out.textContent = JSON.stringify(response, null, 2);
+      renderResults(response);
+    });
+
+    document.getElementById('searchExample').addEventListener('click', () => {
+      document.getElementById('searchQuery').value = 'Titanic';
+      document.getElementById('searchCategory').value = 'movies';
+      document.getElementById('searchForm').requestSubmit();
+    });
+
+    document.getElementById('resetPlayer').addEventListener('click', resetPlayer);
+    document.getElementById('clearPlayerHero').addEventListener('click', resetPlayer);
+
     streamVideo.addEventListener('waiting', () => {
       playerMeta.textContent = 'Player buffering... waiting for torrent pieces.';
+      setStage('Buffering', 'warning');
     });
 
     streamVideo.addEventListener('playing', () => {
-      if(streamVideo.currentSrc){
+      if (streamVideo.currentSrc) {
         playerMeta.textContent = `Playing stream: ${streamVideo.currentSrc}`;
+        setStage('Playing', 'success');
+        setConnection('Streaming', 'success');
       }
     });
 
     streamVideo.addEventListener('error', () => {
       const mediaError = streamVideo.error;
-      if(!mediaError){
+      if (!mediaError) {
         playerMeta.textContent = 'Playback failed: unknown media error.';
+        setStage('Video error', 'danger');
         return;
       }
 
@@ -260,66 +1191,13 @@
         3: 'MEDIA_ERR_DECODE',
         4: 'MEDIA_ERR_SRC_NOT_SUPPORTED',
       };
-      playerMeta.textContent = `Playback failed: ${codeMap[mediaError.code] || mediaError.code}. If this keeps happening, try a torrent with MP4/MOV source and active seeders.`;
+      playerMeta.textContent = `Playback failed: ${codeMap[mediaError.code] || mediaError.code}. Try an MP4/MOV source with active seeders.`;
+      setStage('Video error', 'danger');
     });
 
-    // register
-    document.getElementById('registerForm').addEventListener('submit', async e =>{
-      e.preventDefault();
-      const email = document.getElementById('regEmail').value;
-      const password = document.getElementById('regPassword').value;
-      const r = await postJson('/auth/register', { email, password });
-      out.textContent = JSON.stringify(r, null, 2);
-      if(r && r.access_token){ setStoredToken(r.access_token); }
-    });
-
-    // login
-    document.getElementById('loginForm').addEventListener('submit', async e =>{
-      e.preventDefault();
-      const email = document.getElementById('loginEmail').value;
-      const password = document.getElementById('loginPassword').value;
-      const r = await postJson('/auth/login', { email, password });
-      out.textContent = JSON.stringify(r, null, 2);
-      if(r && r.access_token){ setStoredToken(r.access_token); }
-    });
-
-    // token controls
-    document.getElementById('saveToken').addEventListener('click', ()=>{
-      const v = document.getElementById('tokenInput').value.trim();
-      setStoredToken(v);
-    });
-    document.getElementById('clearToken').addEventListener('click', ()=>{ setStoredToken(''); });
-
-    // search
-    function renderResults(data){
-      const container = document.getElementById('results');
-      if(!data || !data.data) { container.innerHTML = '<p>No results</p>'; return; }
-      const items = data.data;
-      container.innerHTML = items.map((i, idx) => `\n        <div class="result-card">\n          <strong>${escapeHtml(i.name)}</strong><br/>\n          Size: ${escapeHtml(i.size)} • Seeders: ${escapeHtml(i.seeders)} • Leechers: ${escapeHtml(i.leechers)}\n          <div class="result-actions">\n            <a href="${escapeHtml(i.magnet)}" target="_blank" rel="noopener">Magnet Link</a>\n            <button type="button" class="playBtn" data-idx="${idx}">Prepare &amp; Play</button>\n          </div>\n        </div>`).join('');
-
-      container.querySelectorAll('.playBtn').forEach(btn => {
-        btn.addEventListener('click', async () => {
-          const idx = Number(btn.dataset.idx);
-          const item = items[idx];
-          if(!item) return;
-          await prepareAndPlay(item.hash, item.magnet, item.name);
-        });
-      });
-    }
-
-    document.getElementById('searchForm').addEventListener('submit', async e =>{
-      e.preventDefault();
-      const q = document.getElementById('searchQuery').value.trim();
-      const cat = document.getElementById('searchCategory').value;
-      if(!q) return;
-      const path = `/search/?query=${encodeURIComponent(q)}&category=${encodeURIComponent(cat)}`;
-      const r = await getJson(path, true);
-      out.textContent = JSON.stringify(r, null, 2);
-      renderResults(r);
-    });
-
-    // initialize
     renderToken();
+    resetPlayer();
+    resultsMeta.textContent = 'Ready to search.';
   </script>
 </body>
 </html>
