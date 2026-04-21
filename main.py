@@ -4,7 +4,7 @@ from importlib import import_module
 load_dotenv()
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from auth import router as auth_router
@@ -56,6 +56,11 @@ async def ui():
 @app.get("/health")
 async def health():
     return {"status": "ok", "service": "TorrentStream", "database": "mongodb"}
+
+
+@app.get("/favicon.ico")
+async def favicon():
+    return Response(status_code=204)
 
 
 if __name__ == "__main__":
