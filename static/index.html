@@ -751,6 +751,8 @@
     const resultsMeta = document.getElementById('resultsMeta');
     let streamSocket = null;
     let streamReady = false;
+    let currentSelectedVideo = '';
+    let currentContentType = '';
 
     function setBadge(el, text, tone = 'accent') {
       el.textContent = text;
@@ -832,6 +834,43 @@
         .replaceAll("'", '&#39;');
     }
 
+    function videoExtension(name) {
+      const match = String(name || '').toLowerCase().match(/\.([a-z0-9]+)(?:[?#].*)?$/);
+      return match ? match[1] : '';
+    }
+
+    function mimeFromVideoName(name) {
+      switch (videoExtension(name)) {
+        case 'mp4':
+        case 'm4v':
+          return 'video/mp4';
+        case 'mov':
+          return 'video/quicktime';
+        case 'webm':
+          return 'video/webm';
+        case 'ogv':
+        case 'ogg':
+          return 'video/ogg';
+        case 'ts':
+          return 'video/mp2t';
+        case 'mkv':
+          return 'video/x-matroska';
+        case 'avi':
+          return 'video/x-msvideo';
+        case 'mpeg':
+        case 'mpg':
+          return 'video/mpeg';
+        default:
+          return '';
+      }
+    }
+
+    function browserCanPlayVideo(videoName, contentType) {
+      const mime = contentType || mimeFromVideoName(videoName);
+      if (!mime) return true;
+      return streamVideo.canPlayType(mime) !== '';
+    }
+
     function buildWsUrl(hash, token) {
       return `wss://${window.location.host}/stream/ws?hash=${encodeURIComponent(hash)}&token=${encodeURIComponent(token)}`;
     }
@@ -846,6 +885,8 @@
     function resetPlayer() {
       closeStreamSocket();
       streamReady = false;
+      currentSelectedVideo = '';
+      currentContentType = '';
       streamVideo.pause();
       streamVideo.removeAttribute('src');
       streamVideo.load();
@@ -920,8 +961,22 @@
           const playbackUrl = message.stream_url;
           const selectedVideo = message.selected_video?.name || '(unknown)';
           const subtitleCount = Array.isArray(message.subtitle_tracks) ? message.subtitle_tracks.length : 0;
+          const contentType = message.content_type || mimeFromVideoName(selectedVideo);
           streamReady = true;
           updateProgress(100);
+
+          currentSelectedVideo = selectedVideo;
+          currentContentType = contentType;
+
+          if (!browserCanPlayVideo(selectedVideo, contentType)) {
+            setConnection('Browser limited', 'warning');
+            setStage('Unsupported', 'warning');
+            playerMeta.textContent = `Selected file ${selectedVideo}${contentType ? ` (${contentType})` : ''} is not playable in this browser. Try an MP4/MOV/WEBM source or open it in the iOS app.`;
+            resultsMeta.textContent = `Prepared ${selectedVideo}, but browser playback is not supported for this format.`;
+            closeStreamSocket();
+            return;
+          }
+
           setConnection('Streaming', 'success');
           setStage('Ready', 'success');
           playerMeta.textContent = `Now playing: ${selectedVideo} | Subtitles: ${subtitleCount}`;
@@ -1116,7 +1171,10 @@
         3: 'MEDIA_ERR_DECODE',
         4: 'MEDIA_ERR_SRC_NOT_SUPPORTED',
       };
-      playerMeta.textContent = `Playback failed: ${codeMap[mediaError.code] || mediaError.code}. Try an MP4/MOV source with active seeders.`;
+      const sourceHint = currentSelectedVideo
+        ? ` Selected file ${currentSelectedVideo}${currentContentType ? ` (${currentContentType})` : ''} is not playable in this browser.`
+        : ' Try an MP4/MOV/WEBM source with active seeders.';
+      playerMeta.textContent = `Playback failed: ${codeMap[mediaError.code] || mediaError.code}.${sourceHint}`;
       setStage('Video error', 'danger');
     });
 
