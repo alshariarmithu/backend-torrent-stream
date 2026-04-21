@@ -8,3 +8,5 @@ python-multipart==0.0.6
 aiofiles==23.2.1
 pytest
 bcrypt==3.2.2
+libtorrent
+python-libtorrent
