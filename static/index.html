@@ -834,8 +834,7 @@
     }
 
     function buildWsUrl(hash, token) {
-      const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
-      return `${proto}://${window.location.host}/stream/ws?hash=${encodeURIComponent(hash)}&token=${encodeURIComponent(token)}`;
+      return `ws://${window.location.host}/stream/ws?hash=${encodeURIComponent(hash)}&token=${encodeURIComponent(token)}`;
     }
 
     function buildHttpPlaybackUrl(streamPath, token) {
