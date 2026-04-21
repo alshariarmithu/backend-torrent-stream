@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from fastapi import HTTPException
 
 from models import TorrentPayload
@@ -31,7 +33,25 @@ DEFAULT_BLOCKED_SITE_KEYWORDS = [
     "manyvids",
 ]
 
-ALL_BLOCKED_KEYWORDS = sorted(set(DEFAULT_BADWORD_KEYWORDS + DEFAULT_BLOCKED_SITE_KEYWORDS))
+
+def _load_source_blocked_keywords() -> list[str]:
+    # Source: https://github.com/rrgeorge-pdcontributions/NSFW-Words-List/blob/master/nsfw_list.txt
+    keywords_path = Path(__file__).with_name("nsfw_list.txt")
+    try:
+        return [
+            line.strip().lower()
+            for line in keywords_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+    except OSError:
+        return []
+
+
+SOURCE_BLOCKED_KEYWORDS = _load_source_blocked_keywords()
+
+ALL_BLOCKED_KEYWORDS = sorted(
+    set(DEFAULT_BADWORD_KEYWORDS + DEFAULT_BLOCKED_SITE_KEYWORDS + SOURCE_BLOCKED_KEYWORDS)
+)
 
 
 def _normalize(value: str | None) -> str:
