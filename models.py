@@ -29,6 +29,8 @@ class TorrentItem(Document):
     site: str = ""
     url: str = ""
     added_at: datetime = Field(default_factory=datetime.utcnow)
+    hit_count: int = 0
+    last_hit_at: Optional[datetime] = None
 
     class Settings:
         name = "torrent_items"
@@ -63,6 +65,25 @@ class WatchLaterItem(Document):
     class Settings:
         name = "watchlater"
         indexes = [[("user_id", 1), ("torrent_id", 1)]]
+
+
+class UserRecentTorrent(Document):
+    user_id: str
+    torrent_id: str
+    source: str = "search"
+    hit_count: int = 1
+    last_seen_at: datetime = Field(default_factory=datetime.utcnow)
+
+    class Settings:
+        name = "recent_torrents"
+        indexes = [
+            IndexModel(
+                [("user_id", 1), ("torrent_id", 1)],
+                unique=True,
+                name="recent_torrents_unique_user_torrent",
+            ),
+            [("user_id", 1), ("last_seen_at", -1)],
+        ]
 
 
 class PlaylistEntry(BaseModel):

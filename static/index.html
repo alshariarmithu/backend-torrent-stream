@@ -770,6 +770,8 @@
             </div>
             <div class="button-row">
               <button class="btn" type="submit">Search torrents</button>
+              <button class="btn btn--ghost" type="button" id="loadTrending">Trending</button>
+              <button class="btn btn--ghost" type="button" id="loadRecent">Recent</button>
               <button class="btn btn--ghost" type="button" id="searchExample">Load example query</button>
             </div>
           </form>
@@ -866,6 +868,7 @@
     const stageChip = document.getElementById('stageChip');
     const authState = document.getElementById('authState');
     const resultsMeta = document.getElementById('resultsMeta');
+    let currentResultsMode = 'search';
     const communityMeta = document.getElementById('communityMeta');
     const communityPosts = document.getElementById('communityPosts');
     const communityCaption = document.getElementById('communityCaption');
@@ -1701,7 +1704,13 @@
       }
 
       const items = data.data;
-      resultsMeta.textContent = `${items.length} result${items.length === 1 ? '' : 's'} loaded.`;
+      const label =
+        currentResultsMode === 'trending'
+          ? 'trending item'
+          : currentResultsMode === 'recent'
+            ? 'recent item'
+            : 'result';
+      resultsMeta.textContent = `${items.length} ${label}${items.length === 1 ? '' : 's'} loaded.`;
 
       container.innerHTML = items.map((item, idx) => {
         const poster = item.poster
@@ -1822,6 +1831,7 @@
 
       logClient('search submit', { query, category });
       resultsMeta.textContent = 'Searching…';
+      currentResultsMode = 'search';
       const path = `/search/?query=${encodeURIComponent(query)}&category=${encodeURIComponent(category)}`;
       const response = await getJson(path, true);
       logClient('search response', {
@@ -1836,6 +1846,34 @@
       document.getElementById('searchQuery').value = 'Titanic';
       document.getElementById('searchCategory').value = 'movies';
       document.getElementById('searchForm').requestSubmit();
+    });
+
+    document.getElementById('loadTrending').addEventListener('click', async () => {
+      const category = document.getElementById('searchCategory').value;
+      resultsMeta.textContent = 'Loading trending…';
+      currentResultsMode = 'trending';
+      const path = `/search/trending?category=${encodeURIComponent(category)}`;
+      const response = await getJson(path, true);
+      logClient('trending response', {
+        results: Array.isArray(response?.data) ? response.data.length : 0,
+        path,
+      });
+      out.textContent = JSON.stringify(response, null, 2);
+      renderResults(response);
+    });
+
+    document.getElementById('loadRecent').addEventListener('click', async () => {
+      const category = document.getElementById('searchCategory').value;
+      resultsMeta.textContent = 'Loading recent history…';
+      currentResultsMode = 'recent';
+      const path = `/search/recent?category=${encodeURIComponent(category)}`;
+      const response = await getJson(path, true);
+      logClient('recent response', {
+        results: Array.isArray(response?.data) ? response.data.length : 0,
+        path,
+      });
+      out.textContent = JSON.stringify(response, null, 2);
+      renderResults(response);
     });
 
     document.getElementById('createCommunityPost').addEventListener('click', async () => {

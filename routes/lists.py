@@ -5,7 +5,9 @@ from uuid import uuid4
 from fastapi import APIRouter, Depends, HTTPException
 from pymongo.errors import PyMongoError
 
+from activity import record_recent_torrent, touch_torrent
 from auth import get_current_user
+from content_policy import assert_allowed_torrent
 from models import (
     Playlist,
     PlaylistCreate,
@@ -21,7 +23,7 @@ from models import (
 
 router = APIRouter()
 
-LISTS_DEMO_MODE = os.getenv("LISTS_DEMO_MODE", "true").lower() not in {"0", "false", "no"}
+LISTS_DEMO_MODE = os.getenv("LISTS_DEMO_MODE", "false").lower() in {"1", "true", "yes"}
 
 DEMO_TORRENTS: dict[str, dict] = {}
 DEMO_TORRENTS_BY_HASH: dict[str, str] = {}
@@ -162,10 +164,15 @@ async def _resolve_torrent(torrent_id: str) -> TorrentItem | dict | None:
 
 
 async def get_or_create_torrent(payload: TorrentPayload) -> TorrentItem | dict:
+    assert_allowed_torrent(payload)
+
     if LISTS_DEMO_MODE:
         return _demo_get_or_create_torrent(payload)
 
     try:
+        tracked = await touch_torrent(payload, hit_increment=1)
+        if tracked is not None:
+            return tracked
         if payload.hash:
             existing = await TorrentItem.find_one(TorrentItem.hash == payload.hash)
             if existing:
@@ -202,12 +209,12 @@ async def materialize_rows(rows: list[WatchlistItem | WishlistItem | WatchLaterI
 
 async def _get_rows(bucket: str, user_id: str, model) -> list[WatchlistItem | WishlistItem | WatchLaterItem | dict]:
     if LISTS_DEMO_MODE:
-        return list(_list_bucket(bucket, user_id))
+        return sorted(_list_bucket(bucket, user_id), key=lambda row: row["added_at"], reverse=True)
 
     try:
-        return await model.find(model.user_id == user_id).to_list()
+        return await model.find(model.user_id == user_id).sort([("added_at", -1)]).to_list()
     except PyMongoError:
-        return list(_list_bucket(bucket, user_id))
+        return sorted(_list_bucket(bucket, user_id), key=lambda row: row["added_at"], reverse=True)
 
 
 async def _find_existing_row(bucket: str, user_id: str, torrent_id: str, model) -> WatchlistItem | WishlistItem | WatchLaterItem | dict | None:
@@ -258,6 +265,7 @@ async def add_watchlist(payload: TorrentPayload, user: User = Depends(get_curren
         await WatchlistItem(user_id=user_id, torrent_id=torrent_id).insert()
     except PyMongoError:
         _demo_add_row("watchlist", user_id, torrent_id)
+    await record_recent_torrent(user_id, torrent_id, source="watchlist")
     return {"message": "Added to watchlist"}
 
 
@@ -285,6 +293,8 @@ async def mark_watched(
             demo_item["watched"] = watched
         else:
             _demo_add_row("watchlist", user_id, item.torrent_id, watched=watched)["id"] = item_id
+    torrent_id = item["torrent_id"] if isinstance(item, dict) else item.torrent_id
+    await record_recent_torrent(user_id, torrent_id, source="watchlist")
     return {"message": "Updated"}
 
 
@@ -373,6 +383,7 @@ async def add_watchlater(payload: TorrentPayload, user: User = Depends(get_curre
         await WatchLaterItem(user_id=user_id, torrent_id=torrent_id).insert()
     except PyMongoError:
         _demo_add_row("watchlater", user_id, torrent_id)
+    await record_recent_torrent(user_id, torrent_id, source="watchlater")
     return {"message": "Added to watch later"}
 
 
@@ -529,6 +540,7 @@ async def add_playlist_item(
                 "added_at": _now(),
             }
         )
+        await record_recent_torrent(user_id, torrent_id, source="playlist")
         return {"message": "Added to playlist"}
 
     try:
@@ -543,6 +555,7 @@ async def add_playlist_item(
             )
         )
         await pl.save()
+        await record_recent_torrent(user_id, torrent_id, source="playlist")
     except PyMongoError:
         playlist = _demo_find_playlist(user_id, playlist_id)
         if not playlist:
@@ -555,6 +568,7 @@ async def add_playlist_item(
                 "added_at": _now(),
             }
         )
+        await record_recent_torrent(user_id, torrent_id, source="playlist")
     return {"message": "Added to playlist"}
 
 

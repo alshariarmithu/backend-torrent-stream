@@ -8,6 +8,7 @@ from models import (
     CommunityPost,
     CommunityPostVote,
     User,
+    UserRecentTorrent,
     TorrentItem,
     WatchlistItem,
     WishlistItem,
@@ -30,6 +31,7 @@ async def init_db() -> None:
         document_models=[
             User,
             TorrentItem,
+            UserRecentTorrent,
             WatchlistItem,
             WishlistItem,
             WatchLaterItem,

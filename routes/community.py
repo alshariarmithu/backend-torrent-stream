@@ -5,6 +5,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from auth import get_current_user
+from content_policy import assert_allowed_text, assert_allowed_torrent
 from models import (
     CommunityComment,
     CommunityCommentCreate,
@@ -109,6 +110,10 @@ async def get_posts(
 async def create_post(body: CommunityPostCreate, user: User = Depends(get_current_user)):
     if not body.torrent.name.strip():
         raise HTTPException(status_code=400, detail="torrent.name is required")
+    assert_allowed_torrent(body.torrent)
+    assert_allowed_text(body.caption, "caption")
+    for tag in body.tags:
+        assert_allowed_text(tag, "tag")
 
     post = CommunityPost(
         user_id=str(user.id),
@@ -147,6 +152,7 @@ async def add_comment(
     content = body.content.strip()
     if not content:
         raise HTTPException(status_code=400, detail="Comment content cannot be empty")
+    assert_allowed_text(content, "comment")
 
     post = await _get_post_or_404(post_id)
     comment = CommunityComment(
