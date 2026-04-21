@@ -889,11 +889,20 @@ def _ensure_hls_session(torrent_hash: str, media: dict, available_bytes: int) ->
 def _playlist_with_token(playlist_path: Path, torrent_hash: str, token: str) -> str:
     content = playlist_path.read_text(encoding="utf-8")
     rewritten: list[str] = []
+
+    def with_token_for_asset(asset_name: str) -> str:
+        return f"/stream/hls/{torrent_hash}/{asset_name}?token={quote(token, safe='')}"
+
     for line in content.splitlines():
         if not line or line.startswith("#"):
+            if line.startswith("#EXT-X-MAP:") and 'URI="' in line:
+                prefix, remainder = line.split('URI="', 1)
+                asset_name, suffix = remainder.split('"', 1)
+                rewritten.append(f'{prefix}URI="{with_token_for_asset(asset_name)}"{suffix}')
+                continue
             rewritten.append(line)
             continue
-        rewritten.append(f"/stream/hls/{torrent_hash}/{line}?token={quote(token, safe='')}")
+        rewritten.append(with_token_for_asset(line))
     return "\n".join(rewritten) + "\n"
 
 
