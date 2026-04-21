@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Optional
+from typing import Literal, Optional
 
 from beanie import Document, Indexed
 from pydantic import BaseModel, EmailStr, Field
+from pymongo import IndexModel
 
 
 class User(Document):
@@ -94,6 +95,72 @@ class TorrentPayload(BaseModel):
     category: Optional[str] = ""
     site: Optional[str] = ""
     url: Optional[str] = ""
+
+
+class CommunityPostCreate(BaseModel):
+    caption: Optional[str] = ""
+    torrent: TorrentPayload
+    tags: list[str] = Field(default_factory=list)
+
+
+class CommunityCommentCreate(BaseModel):
+    content: str
+
+
+class CommunityVoteRequest(BaseModel):
+    value: Literal[-1, 0, 1]
+
+
+class CommunityPost(Document):
+    user_id: str
+    author_email: EmailStr
+    caption: str = ""
+    torrent: TorrentPayload
+    tags: list[str] = Field(default_factory=list)
+    score: int = 0
+    upvote_count: int = 0
+    downvote_count: int = 0
+    comment_count: int = 0
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+    class Settings:
+        name = "community_posts"
+        indexes = [
+            [("score", -1), ("created_at", -1)],
+            [("created_at", -1)],
+        ]
+
+
+class CommunityComment(Document):
+    post_id: str
+    user_id: str
+    author_email: EmailStr
+    content: str
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+    class Settings:
+        name = "community_comments"
+        indexes = [
+            [("post_id", 1), ("created_at", 1)],
+        ]
+
+
+class CommunityPostVote(Document):
+    post_id: str
+    user_id: str
+    value: Literal[-1, 1]
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+    class Settings:
+        name = "community_post_votes"
+        indexes = [
+            IndexModel(
+                [("post_id", 1), ("user_id", 1)],
+                unique=True,
+                name="community_post_votes_unique_post_user",
+            ),
+        ]
 
 
 class PlaylistCreate(BaseModel):

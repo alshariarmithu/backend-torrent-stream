@@ -4,6 +4,9 @@ from pymongo import AsyncMongoClient
 from beanie import init_beanie
 
 from models import (
+    CommunityComment,
+    CommunityPost,
+    CommunityPostVote,
     User,
     TorrentItem,
     WatchlistItem,
@@ -31,6 +34,9 @@ async def init_db() -> None:
             WishlistItem,
             WatchLaterItem,
             Playlist,
+            CommunityPost,
+            CommunityComment,
+            CommunityPostVote,
         ],
     )
 
