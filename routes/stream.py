@@ -778,7 +778,6 @@ def _ensure_hls_session(torrent_hash: str, media: dict, available_bytes: int) ->
             "-loglevel",
             "warning",
             "-nostdin",
-            "-re",
             "-probesize",
             str(HLS_PROBE_SIZE_BYTES),
             "-analyzeduration",
@@ -821,10 +820,14 @@ def _ensure_hls_session(torrent_hash: str, media: dict, available_bytes: int) ->
             str(HLS_SEGMENT_TIME_SEC),
             "-hls_list_size",
             str(HLS_LIST_SIZE),
+            "-hls_segment_type",
+            "fmp4",
+            "-hls_fmp4_init_filename",
+            "init.mp4",
             "-hls_flags",
             "append_list+delete_segments+independent_segments+temp_file",
             "-hls_segment_filename",
-            str(session_dir / "segment_%05d.ts"),
+            str(session_dir / "segment_%05d.m4s"),
             str(playlist_path),
         ]
 
@@ -1429,7 +1432,14 @@ async def stream_hls_asset(
     if not asset_path.exists() or not asset_path.is_file():
         raise HTTPException(404, "HLS asset not found")
 
-    media_type = mimetypes.guess_type(str(asset_path))[0] or "application/octet-stream"
+    media_type = mimetypes.guess_type(str(asset_path))[0]
+    if not media_type:
+        if asset_path.suffix.lower() in {".m4s", ".mp4"}:
+            media_type = "video/mp4"
+        elif asset_path.suffix.lower() == ".ts":
+            media_type = "video/mp2t"
+        else:
+            media_type = "application/octet-stream"
     _acquire_session_client(torrent_hash, "hls-asset")
     _touch_hls_session(torrent_hash)
 
