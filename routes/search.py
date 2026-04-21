@@ -192,6 +192,17 @@ async def search(
     return result
 
 
+@router.post("/hit")
+async def record_hit(
+    payload: TorrentPayload,
+    user: User = Depends(get_current_user),
+):
+    torrent = await touch_torrent(payload, hit_increment=1)
+    if torrent is not None:
+        await record_recent_torrent(str(user.id), str(torrent.id), source="click")
+    return {"message": "Recorded"}
+
+
 @router.get("/trending")
 async def trending(
     category: Optional[str] = Query("all"),
