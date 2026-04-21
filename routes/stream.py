@@ -19,12 +19,13 @@ iOS integration (new streamlined flow):
   4. Construct stream URL: GET /stream/{hash}?magnet=<encoded>
      Pass this URL directly to AVPlayer / VideoPlayer
 """
-from fastapi import APIRouter, Depends, HTTPException, Header, Request
+from fastapi import APIRouter, Depends, HTTPException, Header, Request, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-import os, time, threading, mimetypes
+import os, time, threading, mimetypes, asyncio
 from pathlib import Path
 from typing import Optional
+from urllib.parse import quote
 from auth import decode_token, get_current_user
 from models import User
 
@@ -263,6 +264,24 @@ def _prioritize_files(handle, video_index: Optional[int], subtitle_indexes: list
             handle.file_priority(idx, priority)
         except Exception:
             continue
+
+
+def _http_base_from_websocket(websocket: WebSocket) -> str:
+    """Build external HTTP base URL for a websocket client request."""
+    forwarded_proto = websocket.headers.get("x-forwarded-proto")
+    forwarded_host = websocket.headers.get("x-forwarded-host")
+    if forwarded_proto and forwarded_host:
+        proto = forwarded_proto.split(",")[0].strip()
+        host = forwarded_host.split(",")[0].strip()
+        return f"{proto}://{host}"
+
+    ws_scheme = websocket.url.scheme
+    http_scheme = "https" if ws_scheme == "wss" else "http"
+    host = websocket.url.hostname or "localhost"
+    port = websocket.url.port
+    if port and not ((http_scheme == "http" and port == 80) or (http_scheme == "https" and port == 443)):
+        return f"{http_scheme}://{host}:{port}"
+    return f"{http_scheme}://{host}"
 
 
 # ─── Request schemas ─────────────────────────────────────────────────────────
@@ -525,6 +544,124 @@ def stream_magnet(
             else "Torrent session started. Metadata is still loading; stream may take longer to start."
         )
     }
+
+
+@router.websocket("/ws/{torrent_hash}")
+async def stream_wait_ws(websocket: WebSocket, torrent_hash: str):
+    """Websocket progress channel for torrent preparation and stream readiness."""
+    token = websocket.query_params.get("token")
+    magnet = websocket.query_params.get("magnet")
+
+    if not token:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Missing auth token")
+        return
+
+    try:
+        payload = decode_token(token)
+        user_id = payload.get("sub")
+        user = await User.get(user_id) if user_id else None
+        if not user:
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="User not found")
+            return
+    except Exception:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Invalid token")
+        return
+
+    await websocket.accept()
+
+    ses, _ = _get_lt()
+    if ses is None:
+        await websocket.send_json({
+            "type": "error",
+            "message": "libtorrent not installed on the server",
+        })
+        await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
+        return
+
+    if magnet:
+        handle = _add_or_get(magnet, torrent_hash)
+    else:
+        with _lock:
+            handle = _sessions.get(torrent_hash)
+
+    if not handle:
+        await websocket.send_json({
+            "type": "error",
+            "message": "Magnet link required or torrent not started",
+        })
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+
+    await websocket.send_json({
+        "type": "started",
+        "hash": torrent_hash,
+        "message": "Torrent session started. Fetching nodes and metadata…",
+    })
+
+    started_at = time.time()
+
+    try:
+        while True:
+            state = handle.status()
+            has_metadata = handle.has_metadata()
+
+            await websocket.send_json({
+                "type": "status",
+                "hash": torrent_hash,
+                "progress": float(state.progress),
+                "download_rate": int(state.download_rate),
+                "upload_rate": int(state.upload_rate),
+                "num_peers": int(state.num_peers),
+                "state": str(state.state),
+                "has_metadata": has_metadata,
+            })
+
+            if has_metadata:
+                video = _best_video_info(handle)
+                if video:
+                    subtitle_tracks = _subtitle_tracks(handle)
+                    _prioritize_files(handle, video.get("index"), [track["index"] for track in subtitle_tracks])
+
+                    base_url = _http_base_from_websocket(websocket)
+                    stream_url = f"{base_url}/stream/{torrent_hash}?token={quote(token, safe='')}"
+
+                    await websocket.send_json({
+                        "type": "ready",
+                        "hash": torrent_hash,
+                        "stream_url": stream_url,
+                        "selected_video": {
+                            "name": video["name"],
+                            "path": video["path"],
+                            "size": video["size"],
+                        },
+                        "subtitles_available": len(subtitle_tracks) > 0,
+                        "subtitle_tracks": subtitle_tracks,
+                        "message": "Stream ready. Start playback now.",
+                    })
+                    await websocket.close(code=status.WS_1000_NORMAL_CLOSURE)
+                    return
+
+            if time.time() - started_at > METADATA_TIMEOUT_SEC:
+                await websocket.send_json({
+                    "type": "error",
+                    "message": "Timed out waiting for torrent metadata",
+                })
+                await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
+                return
+
+            await asyncio.sleep(1)
+    except WebSocketDisconnect:
+        return
+    except Exception as exc:
+        try:
+            await websocket.send_json({
+                "type": "error",
+                "message": str(exc),
+            })
+            await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
+        except Exception:
+            pass
+        return
 
 
 @router.delete("/{torrent_hash}")

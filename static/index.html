@@ -88,6 +88,7 @@
     const out = document.getElementById('out');
     const streamVideo = document.getElementById('streamVideo');
     const playerMeta = document.getElementById('playerMeta');
+    let streamSocket = null;
 
     function getStoredToken(){
       return localStorage.getItem('ts_token') || '';
@@ -143,14 +144,16 @@
         .replaceAll("'", '&#39;');
     }
 
-    function buildPlaybackUrl(payload){
-      const raw = payload.stream_url || payload.stream_path;
-      const abs = new URL(raw, window.location.origin);
-      const token = getStoredToken();
-      if(token){
-        abs.searchParams.set('token', token);
+    function buildWsUrl(hash, magnet, token){
+      const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
+      return `${proto}://${window.location.host}/stream/ws/${encodeURIComponent(hash)}?magnet=${encodeURIComponent(magnet)}&token=${encodeURIComponent(token)}`;
+    }
+
+    function closeStreamSocket(){
+      if(streamSocket){
+        try { streamSocket.close(); } catch (_) {}
+        streamSocket = null;
       }
-      return abs.toString();
     }
 
     async function prepareAndPlay(hash, magnet, name){
@@ -160,28 +163,68 @@
         return;
       }
 
-      playerMeta.textContent = `Preparing stream for: ${name}`;
-      const path = `/stream/magnet/${encodeURIComponent(hash)}?magnet=${encodeURIComponent(magnet)}`;
-      const response = await getJson(path, true);
-      out.textContent = JSON.stringify(response, null, 2);
-
-      if(response && response.detail){
-        playerMeta.textContent = `Prepare failed: ${typeof response.detail === 'string' ? response.detail : JSON.stringify(response.detail)}`;
-        return;
-      }
-
-      const playbackUrl = buildPlaybackUrl(response);
-      streamVideo.src = playbackUrl;
+      closeStreamSocket();
+      streamVideo.removeAttribute('src');
       streamVideo.load();
-      try { await streamVideo.play(); } catch (_) {}
 
-      const selectedVideo = response.selected_video?.name || '(unknown)';
-      const subtitleCount = Array.isArray(response.subtitle_tracks) ? response.subtitle_tracks.length : 0;
-      if(response.prepared === false){
-        playerMeta.textContent = `Preparing torrent metadata... playback may take up to a couple of minutes | URL: ${playbackUrl}`;
-      } else {
-        playerMeta.textContent = `Now playing: ${selectedVideo} | Subtitles: ${subtitleCount} | URL: ${playbackUrl}`;
-      }
+      playerMeta.textContent = `Preparing stream for: ${name}`;
+      const wsUrl = buildWsUrl(hash, magnet, token);
+      streamSocket = new WebSocket(wsUrl);
+
+      streamSocket.onopen = () => {
+        playerMeta.textContent = 'Socket connected. Fetching nodes and metadata…';
+      };
+
+      streamSocket.onmessage = async (event) => {
+        let message;
+        try {
+          message = JSON.parse(event.data);
+        } catch (_) {
+          return;
+        }
+
+        out.textContent = JSON.stringify(message, null, 2);
+
+        if(message.type === 'status'){
+          const pct = Math.round((message.progress || 0) * 100);
+          const peers = message.num_peers || 0;
+          playerMeta.textContent = `Fetching nodes… ${pct}% | peers: ${peers}`;
+          return;
+        }
+
+        if(message.type === 'ready'){
+          const playbackUrl = message.stream_url;
+          const selectedVideo = message.selected_video?.name || '(unknown)';
+          const subtitleCount = Array.isArray(message.subtitle_tracks) ? message.subtitle_tracks.length : 0;
+          playerMeta.textContent = `Now playing: ${selectedVideo} | Subtitles: ${subtitleCount} | URL: ${playbackUrl}`;
+
+          streamVideo.src = playbackUrl;
+          streamVideo.load();
+          try { await streamVideo.play(); } catch (_) {}
+          closeStreamSocket();
+          return;
+        }
+
+        if(message.type === 'error'){
+          playerMeta.textContent = `Prepare failed: ${message.message || 'Unknown error'}`;
+          closeStreamSocket();
+          return;
+        }
+
+        if(message.message){
+          playerMeta.textContent = message.message;
+        }
+      };
+
+      streamSocket.onerror = () => {
+        playerMeta.textContent = 'Socket error while preparing stream.';
+      };
+
+      streamSocket.onclose = (evt) => {
+        if(!streamVideo.currentSrc && evt.code !== 1000){
+          playerMeta.textContent = `Socket closed (${evt.code}). Try again.`;
+        }
+      };
     }
 
     streamVideo.addEventListener('waiting', () => {
