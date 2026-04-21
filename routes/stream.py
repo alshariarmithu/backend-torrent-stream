@@ -23,7 +23,7 @@ from fastapi import APIRouter, Depends, HTTPException, Header, Request, WebSocke
 from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel
 import logging
-import os, time, threading, mimetypes, asyncio, json, shutil, subprocess
+import os, time, threading, mimetypes, asyncio, json, shutil, subprocess, gc
 from pathlib import Path
 from typing import Optional
 from urllib.parse import quote
@@ -73,9 +73,11 @@ STREAM_PROGRESS_POLL_INTERVAL_MS = _env_int("STREAM_PROGRESS_POLL_INTERVAL_MS", 
 STREAM_RANGE_READY_MIN_BYTES = _env_int("STREAM_RANGE_READY_MIN_BYTES", 512 * 1024)
 STREAM_RANGE_PRIORITY_WINDOW_BYTES = _env_int("STREAM_RANGE_PRIORITY_WINDOW_BYTES", 16 * 1024 * 1024)
 STREAM_RANGE_PREFETCH_WINDOW_BYTES = _env_int("STREAM_RANGE_PREFETCH_WINDOW_BYTES", 8 * 1024 * 1024)
-STREAM_IDLE_TIMEOUT_SEC = _env_int("STREAM_IDLE_TIMEOUT", 45)
-STREAM_PREPARING_IDLE_TIMEOUT_SEC = _env_int("STREAM_PREPARING_IDLE_TIMEOUT", 20)
-STREAM_REAPER_INTERVAL_SEC = _env_int("STREAM_REAPER_INTERVAL", 10)
+STREAM_RANGE_BACK_BUFFER_BYTES = _env_int("STREAM_RANGE_BACK_BUFFER_BYTES", 2 * 1024 * 1024)
+STREAM_IDLE_TIMEOUT_SEC = _env_int("STREAM_IDLE_TIMEOUT", 15)
+STREAM_PREPARING_IDLE_TIMEOUT_SEC = _env_int("STREAM_PREPARING_IDLE_TIMEOUT", 10)
+STREAM_REAPER_INTERVAL_SEC = _env_int("STREAM_REAPER_INTERVAL", 3)
+HLS_SESSION_IDLE_TIMEOUT_SEC = _env_int("HLS_SESSION_IDLE_TIMEOUT", 15)
 
 # In-memory session store: hash → libtorrent handle
 _sessions: dict = {}
@@ -86,6 +88,14 @@ _hls_lock = threading.Lock()
 
 HLS_ROOT_DIR = DOWNLOAD_DIR / "_hls"
 HLS_ROOT_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _collect_garbage(reason: str) -> None:
+    try:
+        freed = gc.collect()
+        logger.info("stream gc collected=%s reason=%s", freed, reason)
+    except Exception:
+        logger.exception("stream gc failed reason=%s", reason)
 
 
 async def _authorize_stream_request(token: Optional[str], authorization: Optional[str]) -> User:
@@ -229,7 +239,39 @@ def _remove_torrent_session(torrent_hash: str, *, delete_files: bool, reason: st
                 logger.exception("stream remove_torrent failed hash=%s reason=%s", torrent_hash, reason)
 
     _stop_hls_session(hls_session)
+    _collect_garbage(f"removed torrent session {torrent_hash}: {reason}")
     return True
+
+
+def _touch_hls_session(torrent_hash: str) -> None:
+    with _hls_lock:
+        session = _hls_sessions.get(torrent_hash)
+        if session:
+            session["last_access"] = time.time()
+
+
+def _reap_inactive_hls_sessions() -> None:
+    now = time.time()
+    stale_hashes: list[str] = []
+
+    with _hls_lock:
+        for torrent_hash, session in list(_hls_sessions.items()):
+            with _lock:
+                meta = _session_activity.get(torrent_hash) or {}
+                active_clients = int(meta.get("active_clients", 0))
+            if active_clients > 0:
+                continue
+            last_access = float(session.get("last_access", now))
+            if now - last_access >= HLS_SESSION_IDLE_TIMEOUT_SEC:
+                stale_hashes.append(torrent_hash)
+
+    for torrent_hash in stale_hashes:
+        with _hls_lock:
+            session = _hls_sessions.pop(torrent_hash, None)
+        if session:
+            logger.info("stream stopping stale hls session hash=%s idle_timeout=%ss", torrent_hash, HLS_SESSION_IDLE_TIMEOUT_SEC)
+            _stop_hls_session(session)
+            _collect_garbage(f"stopped stale hls session {torrent_hash}")
 
 
 def _reap_inactive_sessions() -> None:
@@ -265,6 +307,7 @@ def _session_reaper_loop() -> None:
     while True:
         try:
             _reap_inactive_sessions()
+            _reap_inactive_hls_sessions()
         except Exception:
             logger.exception("stream reaper failed")
         time.sleep(max(2, STREAM_REAPER_INTERVAL_SEC))
@@ -434,6 +477,7 @@ def _contiguous_bytes_from_offset(handle, media: dict, start_offset: int = 0) ->
 
 def _prioritize_media_range(
     handle,
+    torrent_hash: str,
     media: dict,
     start_offset: int,
     window_bytes: int = STREAM_RANGE_PRIORITY_WINDOW_BYTES,
@@ -447,30 +491,88 @@ def _prioritize_media_range(
     if start_offset < 0 or start_offset >= file_size:
         return
 
-    end_offset = min(file_size - 1, start_offset + max(1, window_bytes) - 1)
+    retained_start_offset = max(0, start_offset - max(0, STREAM_RANGE_BACK_BUFFER_BYTES))
+    end_offset = min(file_size - 1, retained_start_offset + max(1, window_bytes) - 1)
     ti = context["ti"]
     file_index = int(context["file_index"])
+    first_piece = int(context["first_piece"])
+    last_piece = int(context["last_piece"])
 
     try:
-        start_piece = int(ti.map_file(file_index, start_offset, 1).piece)
+        start_piece = int(ti.map_file(file_index, retained_start_offset, 1).piece)
         end_piece = int(ti.map_file(file_index, end_offset, 1).piece)
         prefetch_end_offset = min(file_size - 1, end_offset + max(0, prefetch_window_bytes))
         prefetch_end_piece = int(ti.map_file(file_index, prefetch_end_offset, 1).piece)
     except Exception:
         return
 
+    target_priorities: dict[int, int] = {}
     for piece in range(start_piece, end_piece + 1):
+        target_priorities[piece] = 7
+    for piece in range(end_piece + 1, prefetch_end_piece + 1):
+        target_priorities.setdefault(piece, 6)
+
+    with _lock:
+        meta = _session_activity.setdefault(
+            torrent_hash,
+            {
+                "active_clients": 0,
+                "last_activity": time.time(),
+                "created_at": time.time(),
+            },
+        )
+        previous_priorities = dict(meta.get("piece_priorities") or {})
+        previous_media_index = meta.get("priority_media_index")
+        initialized = bool(meta.get("piece_window_initialized"))
+
+    if previous_media_index != file_index and previous_priorities:
+        for piece in previous_priorities:
+            try:
+                handle.piece_priority(piece, 0)
+            except Exception:
+                continue
+        previous_priorities = {}
+        initialized = False
+
+    if not initialized:
+        for piece in range(first_piece, last_piece + 1):
+            if piece in target_priorities:
+                continue
+            try:
+                if handle.piece_priority(piece) != 0:
+                    handle.piece_priority(piece, 0)
+            except Exception:
+                continue
+
+    for piece in previous_priorities:
+        if piece in target_priorities:
+            continue
         try:
-            handle.piece_priority(piece, 7)
+            if handle.piece_priority(piece) != 0:
+                handle.piece_priority(piece, 0)
         except Exception:
             continue
 
-    for piece in range(end_piece + 1, prefetch_end_piece + 1):
+    for piece, priority in target_priorities.items():
+        if previous_priorities.get(piece) == priority:
+            continue
         try:
-            if handle.piece_priority(piece) < 6:
-                handle.piece_priority(piece, 6)
+            handle.piece_priority(piece, priority)
         except Exception:
             continue
+
+    with _lock:
+        meta = _session_activity.setdefault(
+            torrent_hash,
+            {
+                "active_clients": 0,
+                "last_activity": time.time(),
+                "created_at": time.time(),
+            },
+        )
+        meta["piece_priorities"] = target_priorities
+        meta["priority_media_index"] = file_index
+        meta["piece_window_initialized"] = True
 
 
 def _media_available_bytes(handle, media: dict, start_offset: int = 0) -> int:
@@ -478,6 +580,20 @@ def _media_available_bytes(handle, media: dict, start_offset: int = 0) -> int:
     if contiguous > 0:
         return contiguous
     return 0
+
+
+def _prioritize_hls_frontier(handle, torrent_hash: str, media: dict) -> int:
+    contiguous_prefix = _media_available_bytes(handle, media, start_offset=0)
+    frontier_offset = max(0, contiguous_prefix - max(STREAM_RANGE_BACK_BUFFER_BYTES, STREAM_CHUNK_SIZE))
+    _prioritize_media_range(
+        handle,
+        torrent_hash,
+        media,
+        frontier_offset,
+        window_bytes=max(HLS_READY_MIN_BYTES, STREAM_RANGE_PRIORITY_WINDOW_BYTES),
+        prefetch_window_bytes=max(STREAM_RANGE_PREFETCH_WINDOW_BYTES, HLS_SEGMENT_TIME_SEC * 2 * 1024 * 1024),
+    )
+    return contiguous_prefix
 
 
 def _wait_file_ready(
@@ -1120,7 +1236,7 @@ async def stream_torrent(
         start = max(0, min(start, total_size - 1))
         end = max(start, min(requested_end, total_size - 1))
         length = end - start + 1
-        _prioritize_media_range(handle, media, start)
+        _prioritize_media_range(handle, torrent_hash, media, start)
 
         ready_min_bytes = STREAM_RANGE_READY_MIN_BYTES if is_range else STREAM_READY_MIN_BYTES
         ready_bytes = _wait_file_ready(
@@ -1163,7 +1279,7 @@ async def stream_torrent(
 
                         available_bytes = _media_available_bytes(handle, media, start_offset=current_offset)
                         if available_bytes <= 0:
-                            _prioritize_media_range(handle, media, current_offset)
+                            _prioritize_media_range(handle, torrent_hash, media, current_offset)
                             if time.time() - last_progress_at >= STREAM_PROGRESS_WAIT_TIMEOUT_SEC:
                                 logger.warning(
                                     "http stream stalled hash=%s file=%s offset=%s available=%s timeout=%s",
@@ -1265,6 +1381,7 @@ async def stream_hls_playlist(
 
         subtitle_tracks = _subtitle_tracks(handle)
         _prioritize_files(handle, media.get("index"), [track["index"] for track in subtitle_tracks])
+        _prioritize_hls_frontier(handle, torrent_hash, media)
 
         ready_bytes = _wait_file_ready(
             handle,
@@ -1285,6 +1402,7 @@ async def stream_hls_playlist(
             raise HTTPException(503, "HLS playlist is not ready yet")
 
         _touch_session_activity(torrent_hash)
+        _touch_hls_session(torrent_hash)
         return PlainTextResponse(
             _playlist_with_token(playlist, torrent_hash, token or ""),
             media_type="application/vnd.apple.mpegurl",
@@ -1313,6 +1431,14 @@ async def stream_hls_asset(
 
     media_type = mimetypes.guess_type(str(asset_path))[0] or "application/octet-stream"
     _acquire_session_client(torrent_hash, "hls-asset")
+    _touch_hls_session(torrent_hash)
+
+    with _lock:
+        handle = _sessions.get(torrent_hash)
+    if handle and handle.has_metadata():
+        media = _best_video_info(handle)
+        if media and media["kind"] == "video":
+            _prioritize_hls_frontier(handle, torrent_hash, media)
 
     async def iter_asset():
         try:
@@ -1393,6 +1519,10 @@ def stream_magnet(
     subtitle_tracks = _subtitle_tracks(handle) if prepared else []
     if media:
         _prioritize_files(handle, media.get("index"), [track["index"] for track in subtitle_tracks])
+        if media["kind"] == "video" and _hls_tools_available():
+            _prioritize_hls_frontier(handle, torrent_hash, media)
+        else:
+            _prioritize_media_range(handle, torrent_hash, media, 0)
         _touch_session_activity(torrent_hash)
 
     base_url = str(request.base_url).rstrip("/")
@@ -1552,6 +1682,10 @@ async def _stream_wait_ws_impl(websocket: WebSocket, torrent_hash: str):
                     current_bytes = _media_available_bytes(handle, media)
                     prefer_direct = _prefer_direct_browser_playback(media)
                     should_prepare_hls = media["kind"] == "video" and _hls_tools_available() and not prefer_direct
+                    if should_prepare_hls:
+                        current_bytes = _prioritize_hls_frontier(handle, torrent_hash, media)
+                    else:
+                        _prioritize_media_range(handle, torrent_hash, media, 0)
                     ready_target = HLS_READY_MIN_BYTES if should_prepare_hls else STREAM_READY_MIN_BYTES
 
                     if current_bytes < ready_target:
