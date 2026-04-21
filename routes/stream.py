@@ -22,7 +22,7 @@ iOS integration (new streamlined flow):
 from fastapi import APIRouter, Depends, HTTPException, Header, Request, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-import os, time, threading, mimetypes, asyncio
+import os, time, threading, mimetypes, asyncio, json
 from pathlib import Path
 from typing import Optional
 from urllib.parse import quote
@@ -546,8 +546,7 @@ def stream_magnet(
     }
 
 
-@router.websocket("/ws/{torrent_hash}")
-async def stream_wait_ws(websocket: WebSocket, torrent_hash: str):
+async def _stream_wait_ws_impl(websocket: WebSocket, torrent_hash: str):
     """Websocket progress channel for torrent preparation and stream readiness."""
     token = websocket.query_params.get("token")
     magnet = websocket.query_params.get("magnet")
@@ -578,11 +577,25 @@ async def stream_wait_ws(websocket: WebSocket, torrent_hash: str):
         await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
         return
 
-    if magnet:
-        handle = _add_or_get(magnet, torrent_hash)
-    else:
-        with _lock:
-            handle = _sessions.get(torrent_hash)
+    with _lock:
+        handle = _sessions.get(torrent_hash)
+
+    if not handle:
+        if not magnet:
+            await websocket.send_json({
+                "type": "need_magnet",
+                "hash": torrent_hash,
+                "message": "Send {\"magnet\":\"...\"} as first websocket message",
+            })
+            try:
+                raw = await asyncio.wait_for(websocket.receive_text(), timeout=20)
+                data = json.loads(raw)
+                magnet = data.get("magnet") if isinstance(data, dict) else None
+            except Exception:
+                magnet = None
+
+        if magnet:
+            handle = _add_or_get(magnet, torrent_hash)
 
     if not handle:
         await websocket.send_json({
@@ -652,16 +665,20 @@ async def stream_wait_ws(websocket: WebSocket, torrent_hash: str):
             await asyncio.sleep(1)
     except WebSocketDisconnect:
         return
-    except Exception as exc:
-        try:
-            await websocket.send_json({
-                "type": "error",
-                "message": str(exc),
-            })
-            await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
-        except Exception:
-            pass
+
+
+@router.websocket("/ws/{torrent_hash}")
+async def stream_wait_ws_path(websocket: WebSocket, torrent_hash: str):
+    await _stream_wait_ws_impl(websocket, torrent_hash)
+
+
+@router.websocket("/ws")
+async def stream_wait_ws_query(websocket: WebSocket):
+    torrent_hash = websocket.query_params.get("hash")
+    if not torrent_hash:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Missing hash")
         return
+    await _stream_wait_ws_impl(websocket, torrent_hash)
 
 
 @router.delete("/{torrent_hash}")

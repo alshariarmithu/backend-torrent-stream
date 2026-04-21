@@ -146,7 +146,7 @@
 
     function buildWsUrl(hash, magnet, token){
       const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
-      return `${proto}://${window.location.host}/stream/ws/${encodeURIComponent(hash)}?magnet=${encodeURIComponent(magnet)}&token=${encodeURIComponent(token)}`;
+      return `${proto}://${window.location.host}/stream/ws?hash=${encodeURIComponent(hash)}&token=${encodeURIComponent(token)}`;
     }
 
     function closeStreamSocket(){
@@ -173,6 +173,9 @@
 
       streamSocket.onopen = () => {
         playerMeta.textContent = 'Socket connected. Fetching nodes and metadata…';
+        try {
+          streamSocket.send(JSON.stringify({ hash, magnet }));
+        } catch (_) {}
       };
 
       streamSocket.onmessage = async (event) => {
@@ -208,6 +211,13 @@
         if(message.type === 'error'){
           playerMeta.textContent = `Prepare failed: ${message.message || 'Unknown error'}`;
           closeStreamSocket();
+          return;
+        }
+
+        if(message.type === 'need_magnet'){
+          try {
+            streamSocket.send(JSON.stringify({ hash, magnet }));
+          } catch (_) {}
           return;
         }
 
