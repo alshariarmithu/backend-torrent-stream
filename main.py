@@ -1,4 +1,5 @@
 from dotenv import load_dotenv
+import logging
 import os
 from importlib import import_module
 load_dotenv()
@@ -12,6 +13,15 @@ from db import lifespan_context
 from routes.lists import router as lists_router
 from routes.search import router as search_router
 from routes.stream import router as stream_router
+
+LOG_LEVEL_NAME = os.getenv("TORRENTSTREAM_LOG_LEVEL", os.getenv("LOG_LEVEL", "INFO")).upper()
+LOG_LEVEL = getattr(logging, LOG_LEVEL_NAME, logging.INFO)
+logging.basicConfig(
+    level=LOG_LEVEL,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+logger = logging.getLogger("torrentstream")
+logger.setLevel(LOG_LEVEL)
 
 try:
     community_router = import_module("routes.community").router
@@ -66,4 +76,10 @@ async def favicon():
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("main:app", host="0.0.0.0", port=int(os.getenv("PORT", 8081)), reload=True)
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=int(os.getenv("PORT", 8081)),
+        reload=True,
+        log_level=LOG_LEVEL_NAME.lower(),
+    )

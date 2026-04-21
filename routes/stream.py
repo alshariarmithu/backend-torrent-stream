@@ -22,6 +22,7 @@ iOS integration (new streamlined flow):
 from fastapi import APIRouter, Depends, HTTPException, Header, Request, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+import logging
 import os, time, threading, mimetypes, asyncio, json
 from pathlib import Path
 from typing import Optional
@@ -30,13 +31,17 @@ from auth import decode_token, get_current_user
 from models import User
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 DOWNLOAD_DIR = Path(os.getenv("TORRENT_DOWNLOAD_DIR", "/tmp/torrentstream"))
 DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 VIDEO_EXTS = {".mkv", ".mp4", ".avi", ".mov", ".m4v", ".webm", ".ts", ".mpg", ".mpeg"}
+AUDIO_EXTS = {".mp3", ".m4a", ".aac", ".wav", ".flac", ".ogg", ".oga", ".opus", ".weba"}
+MEDIA_EXTS = VIDEO_EXTS | AUDIO_EXTS
 SUBTITLE_EXTS = {".srt", ".vtt", ".ass", ".ssa", ".sub", ".idx"}
 PREFERRED_VIDEO_EXTS = (".mp4", ".m4v", ".mov", ".webm", ".mkv", ".avi", ".ts", ".mpg", ".mpeg")
+PREFERRED_AUDIO_EXTS = (".m4a", ".mp3", ".aac", ".opus", ".ogg", ".oga", ".wav", ".flac", ".weba")
 
 
 def _env_int(name: str, default: int) -> int:
@@ -52,6 +57,8 @@ def _env_int(name: str, default: int) -> int:
 PREPARE_TIMEOUT_SEC = _env_int("STREAM_PREPARE_TIMEOUT", 25)
 METADATA_TIMEOUT_SEC = _env_int("STREAM_METADATA_TIMEOUT", 180)
 FILE_WAIT_TIMEOUT_SEC = _env_int("STREAM_FILE_WAIT_TIMEOUT", 120)
+STREAM_CHUNK_SIZE = _env_int("STREAM_CHUNK_SIZE", 32 * 1024)
+STREAM_READY_MIN_BYTES = _env_int("STREAM_READY_MIN_BYTES", 64 * 1024)
 
 # In-memory session store: hash → libtorrent handle
 _sessions: dict = {}
@@ -144,17 +151,55 @@ def _add_or_get(magnet: str, torrent_hash: str):
         return handle
 
 
-def _wait_metadata(handle, timeout: int = 60) -> bool:
+def _wait_metadata(handle, timeout: int = 60, label: str = "") -> bool:
     deadline = time.time() + timeout
+    last_log = 0.0
     while time.time() < deadline:
         if handle.has_metadata():
+            if label:
+                logger.info("%s metadata ready", label)
             return True
+        now = time.time()
+        if label and now - last_log >= 5:
+            remaining = max(0, int(deadline - now))
+            logger.info("%s waiting for metadata (%ss remaining)", label, remaining)
+            last_log = now
         time.sleep(0.5)
+    if label:
+        logger.warning("%s metadata wait timed out after %ss", label, timeout)
     return False
 
 
+def _wait_file_ready(media_path: Path, timeout: int = 60, min_bytes: int = 1, label: str = "") -> int:
+    deadline = time.time() + timeout
+    last_log = 0.0
+
+    while time.time() < deadline:
+        try:
+            size = media_path.stat().st_size
+        except FileNotFoundError:
+            size = 0
+
+        if size >= min_bytes:
+            if label:
+                logger.info("%s file ready bytes=%s", label, size)
+            return size
+
+        now = time.time()
+        if label and now - last_log >= 5:
+            remaining = max(0, int(deadline - now))
+            logger.info("%s waiting for file bytes (%s/%s, %ss remaining)", label, size, min_bytes, remaining)
+            last_log = now
+
+        time.sleep(0.5)
+
+    if label:
+        logger.warning("%s file wait timed out after %ss (min_bytes=%s)", label, timeout, min_bytes)
+    return 0
+
+
 def _best_video(handle) -> Optional[Path]:
-    """Return path to the largest video file inside the torrent."""
+    """Return path to the largest playable media file inside the torrent."""
     info = _best_video_info(handle)
     if not info:
         return None
@@ -162,7 +207,7 @@ def _best_video(handle) -> Optional[Path]:
 
 
 def _best_video_info(handle) -> Optional[dict]:
-    """Return metadata about the largest video file in torrent."""
+    """Return metadata about the best playable media file in the torrent."""
     if not handle.has_metadata():
         return None
 
@@ -175,11 +220,13 @@ def _best_video_info(handle) -> Optional[dict]:
         path = files.file_path(i)
         size = files.file_size(i)
         ext = Path(path).suffix.lower()
-        if ext not in VIDEO_EXTS:
+        if ext not in MEDIA_EXTS:
             continue
 
-        ext_rank = PREFERRED_VIDEO_EXTS.index(ext) if ext in PREFERRED_VIDEO_EXTS else len(PREFERRED_VIDEO_EXTS)
-        content_type = mimetypes.guess_type(str(path))[0] or "video/mp4"
+        kind = "video" if ext in VIDEO_EXTS else "audio"
+        preferred_exts = PREFERRED_VIDEO_EXTS if kind == "video" else PREFERRED_AUDIO_EXTS
+        ext_rank = preferred_exts.index(ext) if ext in preferred_exts else len(preferred_exts)
+        content_type = mimetypes.guess_type(str(path))[0] or ("video/mp4" if kind == "video" else "audio/mpeg")
 
         candidate = {
             "index": i,
@@ -188,6 +235,7 @@ def _best_video_info(handle) -> Optional[dict]:
             "size": int(size),
             "full_path": str(save_path / path),
             "ext": ext,
+            "kind": kind,
             "ext_rank": ext_rank,
             "content_type": content_type,
         }
@@ -297,6 +345,7 @@ class StartRequest(BaseModel):
 @router.post("/start")
 def start_torrent(body: StartRequest, _user: User = Depends(get_current_user)):
     """Start (or resume) downloading a torrent."""
+    logger.info("stream start requested hash=%s magnet_len=%s", body.hash, len(body.magnet) if body.magnet else 0)
     ses, _ = _get_lt()
     if ses is None:
         raise HTTPException(503,
@@ -306,7 +355,9 @@ def start_torrent(body: StartRequest, _user: User = Depends(get_current_user)):
         )
     handle = _add_or_get(body.magnet, body.hash)
     if handle is None:
+        logger.error("stream start failed hash=%s", body.hash)
         raise HTTPException(500, "Failed to start torrent")
+    logger.info("stream start completed hash=%s", body.hash)
     return {"status": "started", "hash": body.hash}
 
 
@@ -326,6 +377,14 @@ def torrent_status(torrent_hash: str, _user: User = Depends(get_current_user)):
         raise HTTPException(404, "Torrent not started – POST /stream/start first")
 
     s = handle.status()
+    logger.info(
+        "status requested hash=%s progress=%.2f peers=%s state=%s metadata=%s",
+        torrent_hash,
+        s.progress * 100,
+        s.num_peers,
+        s.state,
+        handle.has_metadata(),
+    )
     return {
         "hash":          torrent_hash,
         "progress":      round(s.progress * 100, 2),   # 0-100
@@ -341,24 +400,33 @@ def torrent_status(torrent_hash: str, _user: User = Depends(get_current_user)):
 @router.get("/info/{torrent_hash}")
 def torrent_info(torrent_hash: str, _user: User = Depends(get_current_user)):
     """
-    Returns filename and content-type of the video file.
-    iOS: call this after metadata is ready to pre-configure AVPlayer.
+    Returns filename and content-type of the best playable media file.
+    iOS and browser clients can use this after metadata is ready to pre-configure playback.
     """
     with _lock:
         handle = _sessions.get(torrent_hash)
     if not handle:
         raise HTTPException(404, "Torrent not started")
-    if not _wait_metadata(handle, timeout=METADATA_TIMEOUT_SEC):
+    logger.info("info requested hash=%s waiting for metadata", torrent_hash)
+    if not _wait_metadata(handle, timeout=METADATA_TIMEOUT_SEC, label=f"info hash={torrent_hash}"):
         raise HTTPException(504, "Timed out waiting for metadata")
 
-    video = _best_video(handle)
-    if not video:
-        raise HTTPException(404, "No video file found in torrent")
+    media = _best_video(handle)
+    if not media:
+        logger.warning("info no media found hash=%s", torrent_hash)
+        raise HTTPException(404, "No media file found in torrent")
 
-    content_type = mimetypes.guess_type(str(video))[0] or "video/mp4"
+    content_type = mimetypes.guess_type(str(media))[0] or "video/mp4"
     ti = handle.get_torrent_info()
+    logger.info(
+        "info ready hash=%s filename=%s content_type=%s total_size=%s",
+        torrent_hash,
+        media.name,
+        content_type,
+        ti.total_size(),
+    )
     return {
-        "filename":     video.name,
+        "filename":     media.name,
         "content_type": content_type,
         "total_size":   ti.total_size(),
         "hash":         torrent_hash,
@@ -367,14 +435,15 @@ def torrent_info(torrent_hash: str, _user: User = Depends(get_current_user)):
 
 @router.get("/{torrent_hash}")
 async def stream_torrent(
+    request: Request,
     torrent_hash: str,
     magnet: Optional[str] = None,
     token: Optional[str] = None,
-    range: Optional[str] = Header(None),
+    range_header: Optional[str] = Header(None, alias="Range"),
     authorization: Optional[str] = Header(default=None, alias="Authorization"),
 ):
     """
-    Stream the video file via HTTP with Range support (AVPlayer / seek-compatible).
+    Stream the selected media file via HTTP with Range support (AVPlayer / browser seek-compatible).
 
     Usage from iOS:
       1. Encode your JWT as a header — BUT AVPlayer does not support custom headers.
@@ -386,6 +455,14 @@ async def stream_torrent(
     """
     await _authorize_stream_request(token=token, authorization=authorization)
 
+    client_host = request.client.host if request.client else "unknown"
+    logger.info(
+        "http stream requested hash=%s client=%s magnet=%s range=%s",
+        torrent_hash,
+        client_host,
+        bool(magnet),
+        range_header or "none",
+    )
     ses, _ = _get_lt()
     if ses is None:
         raise HTTPException(503, "libtorrent not installed on the server")
@@ -403,41 +480,59 @@ async def stream_torrent(
         raise HTTPException(404, "Torrent not started. POST /stream/start first.")
 
     # Wait for metadata (up to 60 s)
-    if not _wait_metadata(handle, timeout=METADATA_TIMEOUT_SEC):
+    if not _wait_metadata(handle, timeout=METADATA_TIMEOUT_SEC, label=f"http stream hash={torrent_hash}"):
+        logger.warning("http stream metadata timeout hash=%s", torrent_hash)
         raise HTTPException(504, "Timed out waiting for torrent metadata")
 
-    video = _best_video_info(handle)
-    if not video:
-        raise HTTPException(404, "No video file found in torrent")
+    media = _best_video_info(handle)
+    if not media:
+        logger.warning("http stream no media found hash=%s", torrent_hash)
+        raise HTTPException(404, "No media file found in torrent")
 
     subtitle_tracks = _subtitle_tracks(handle)
-    _prioritize_files(handle, video.get("index"), [track["index"] for track in subtitle_tracks])
-    video_path = Path(video["full_path"])
+    _prioritize_files(handle, media.get("index"), [track["index"] for track in subtitle_tracks])
+    media_path = Path(media["full_path"])
+    logger.info(
+        "http stream selected hash=%s file=%s kind=%s content_type=%s subtitles=%s",
+        torrent_hash,
+        media["name"],
+        media["kind"],
+        media["content_type"],
+        len(subtitle_tracks),
+    )
 
-    # Wait until file exists on disk (libtorrent creates the file when first pieces arrive)
-    for _ in range(FILE_WAIT_TIMEOUT_SEC):
-        if video_path.exists():
-            break
-        time.sleep(1)
-    else:
-        raise HTTPException(404, f"Video file not yet on disk: {video_path.name}")
+    ready_bytes = _wait_file_ready(
+        media_path,
+        timeout=FILE_WAIT_TIMEOUT_SEC,
+        min_bytes=STREAM_READY_MIN_BYTES,
+        label=f"http stream hash={torrent_hash}",
+    )
+    if ready_bytes <= 0:
+        logger.warning("http stream file not ready hash=%s file=%s", torrent_hash, media_path.name)
+        raise HTTPException(504, f"Media file not yet ready: {media_path.name}")
 
-    file_size    = video_path.stat().st_size
-    content_type = mimetypes.guess_type(str(video_path))[0] or "video/mp4"
-    chunk_size   = 1024 * 1024  # 1 MB chunks
+    file_size    = media_path.stat().st_size
+    content_type = mimetypes.guess_type(str(media_path))[0] or ("video/mp4" if media["kind"] == "video" else "audio/mpeg")
+    chunk_size   = max(16 * 1024, STREAM_CHUNK_SIZE)
+    logger.info(
+        "http stream chunk size hash=%s chunk_size=%s",
+        torrent_hash,
+        chunk_size,
+    )
 
     # ── Range parsing ──────────────────────────────────────────────────────
     start, end = 0, file_size - 1
     is_range   = False
 
-    if range:
+    if range_header:
         try:
-            range_val = range.replace("bytes=", "")
+            range_val = range_header.replace("bytes=", "")
             s, e = range_val.split("-")
             start    = int(s)
             end      = int(e) if e.strip() else file_size - 1
             is_range = True
         except Exception:
+            logger.warning("http stream malformed range ignored hash=%s range=%s", torrent_hash, range_header)
             pass  # ignore malformed range, serve from 0
 
     # Clamp
@@ -446,7 +541,7 @@ async def stream_torrent(
     length = end - start + 1
 
     def iterfile():
-        with open(video_path, "rb") as f:
+        with open(media_path, "rb") as f:
             f.seek(start)
             remaining = length
             while remaining > 0:
@@ -460,7 +555,7 @@ async def stream_torrent(
         "Content-Range":       f"bytes {start}-{end}/{file_size}",
         "Accept-Ranges":       "bytes",
         "Content-Length":      str(length),
-        "Content-Disposition": f'inline; filename="{video_path.name}"',
+        "Content-Disposition": f'inline; filename="{media_path.name}"',
         "Cache-Control":       "no-cache",
     }
 
@@ -489,6 +584,13 @@ def stream_magnet(
     The returned URL can be passed directly to AVPlayer without polling.
     The first request may block briefly while libtorrent initializes.
     """
+    client_host = request.client.host if request.client else "unknown"
+    logger.info(
+        "stream magnet requested hash=%s client=%s magnet=%s",
+        torrent_hash,
+        client_host,
+        bool(magnet),
+    )
     ses, _ = _get_lt()
     if ses is None:
         raise HTTPException(
@@ -501,10 +603,12 @@ def stream_magnet(
     if magnet:
         with _lock:
             if torrent_hash not in _sessions:
+                logger.info("stream magnet auto-starting hash=%s", torrent_hash)
                 _add_or_get(magnet, torrent_hash)
     else:
         with _lock:
             if torrent_hash not in _sessions:
+                logger.warning("stream magnet missing and no session hash=%s", torrent_hash)
                 raise HTTPException(
                     400,
                     "Magnet link required: ?magnet=<encoded_link>"
@@ -513,38 +617,59 @@ def stream_magnet(
     with _lock:
         handle = _sessions.get(torrent_hash)
     if not handle:
+        logger.error("stream magnet handle missing hash=%s", torrent_hash)
         raise HTTPException(404, "Torrent not started")
 
-    # Heavy preparation on server: wait metadata, choose best video, scan subtitles.
-    prepared = _wait_metadata(handle, timeout=PREPARE_TIMEOUT_SEC)
-    video = _best_video_info(handle) if prepared else None
+    # Heavy preparation on server: wait metadata, choose best media, scan subtitles.
+    prepared = _wait_metadata(handle, timeout=PREPARE_TIMEOUT_SEC, label=f"stream magnet hash={torrent_hash}")
+    media = _best_video_info(handle) if prepared else None
     subtitle_tracks = _subtitle_tracks(handle) if prepared else []
-    if video:
-        _prioritize_files(handle, video.get("index"), [track["index"] for track in subtitle_tracks])
+    if media:
+        _prioritize_files(handle, media.get("index"), [track["index"] for track in subtitle_tracks])
 
     base_url = str(request.base_url).rstrip("/")
     stream_path = f"/stream/{torrent_hash}"
-    content_type = video["content_type"] if video else None
+    content_type = media["content_type"] if media else None
+    if media:
+        logger.info(
+            "stream magnet ready hash=%s media=%s kind=%s content_type=%s subtitles=%s stream_url=%s",
+            torrent_hash,
+            media["name"],
+            media["kind"],
+            content_type,
+            len(subtitle_tracks),
+            f"{base_url}{stream_path}",
+        )
+    else:
+        logger.warning("stream magnet preparing hash=%s prepared=%s", torrent_hash, prepared)
 
     return {
-        "status": "ready" if prepared and video else "preparing",
-        "prepared": bool(prepared and video),
+        "status": "ready" if prepared and media else "preparing",
+        "prepared": bool(prepared and media),
         "hash": torrent_hash,
         "stream_path": stream_path,
         "stream_url": f"{base_url}{stream_path}",
         "content_type": content_type,
         "magnet": magnet,
         "selected_video": {
-            "name": video["name"],
-            "path": video["path"],
-            "size": video["size"],
+            "name": media["name"],
+            "path": media["path"],
+            "size": media["size"],
+            "kind": media["kind"],
             "content_type": content_type,
-        } if video else None,
+        } if media else None,
+        "selected_media": {
+            "name": media["name"],
+            "path": media["path"],
+            "size": media["size"],
+            "kind": media["kind"],
+            "content_type": content_type,
+        } if media else None,
         "subtitles_available": len(subtitle_tracks) > 0,
         "subtitle_tracks": subtitle_tracks,
         "message": (
-            "Torrent prepared. Stream link ready for AVPlayer."
-            if prepared and video
+            "Torrent prepared. Stream link ready for playback."
+            if prepared and media
             else "Torrent session started. Metadata is still loading; stream may take longer to start."
         )
     }
@@ -554,8 +679,11 @@ async def _stream_wait_ws_impl(websocket: WebSocket, torrent_hash: str):
     """Websocket progress channel for torrent preparation and stream readiness."""
     token = websocket.query_params.get("token")
     magnet = websocket.query_params.get("magnet")
+    client_host = websocket.client.host if websocket.client else "unknown"
+    logger.info("stream ws requested hash=%s client=%s token=%s magnet=%s", torrent_hash, client_host, bool(token), bool(magnet))
 
     if not token:
+        logger.warning("stream ws missing token hash=%s client=%s", torrent_hash, client_host)
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Missing auth token")
         return
 
@@ -564,9 +692,11 @@ async def _stream_wait_ws_impl(websocket: WebSocket, torrent_hash: str):
         user_id = payload.get("sub")
         user = await User.get(user_id) if user_id else None
         if not user:
+            logger.warning("stream ws user not found hash=%s client=%s", torrent_hash, client_host)
             await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="User not found")
             return
     except Exception:
+        logger.warning("stream ws invalid token hash=%s client=%s", torrent_hash, client_host)
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Invalid token")
         return
 
@@ -574,6 +704,7 @@ async def _stream_wait_ws_impl(websocket: WebSocket, torrent_hash: str):
 
     ses, _ = _get_lt()
     if ses is None:
+        logger.error("stream ws libtorrent missing hash=%s", torrent_hash)
         await websocket.send_json({
             "type": "error",
             "message": "libtorrent not installed on the server",
@@ -586,6 +717,7 @@ async def _stream_wait_ws_impl(websocket: WebSocket, torrent_hash: str):
 
     if not handle:
         if not magnet:
+            logger.info("stream ws requesting magnet hash=%s", torrent_hash)
             await websocket.send_json({
                 "type": "need_magnet",
                 "hash": torrent_hash,
@@ -599,9 +731,11 @@ async def _stream_wait_ws_impl(websocket: WebSocket, torrent_hash: str):
                 magnet = None
 
         if magnet:
+            logger.info("stream ws auto-starting hash=%s", torrent_hash)
             handle = _add_or_get(magnet, torrent_hash)
 
     if not handle:
+        logger.warning("stream ws no handle hash=%s", torrent_hash)
         await websocket.send_json({
             "type": "error",
             "message": "Magnet link required or torrent not started",
@@ -614,6 +748,7 @@ async def _stream_wait_ws_impl(websocket: WebSocket, torrent_hash: str):
         "hash": torrent_hash,
         "message": "Torrent session started. Fetching nodes and metadata…",
     })
+    logger.info("stream ws started hash=%s", torrent_hash)
 
     started_at = time.time()
 
@@ -634,14 +769,49 @@ async def _stream_wait_ws_impl(websocket: WebSocket, torrent_hash: str):
             })
 
             if has_metadata:
-                video = _best_video_info(handle)
-                if video:
+                media = _best_video_info(handle)
+                if media:
                     subtitle_tracks = _subtitle_tracks(handle)
-                    _prioritize_files(handle, video.get("index"), [track["index"] for track in subtitle_tracks])
+                    _prioritize_files(handle, media.get("index"), [track["index"] for track in subtitle_tracks])
+
+                    media_path = Path(media["full_path"])
+                    current_bytes = media_path.stat().st_size if media_path.exists() else 0
+
+                    if current_bytes < STREAM_READY_MIN_BYTES:
+                        await websocket.send_json({
+                            "type": "status",
+                            "hash": torrent_hash,
+                            "progress": float(state.progress),
+                            "download_rate": int(state.download_rate),
+                            "upload_rate": int(state.upload_rate),
+                            "num_peers": int(state.num_peers),
+                            "state": str(state.state),
+                            "has_metadata": has_metadata,
+                            "file_bytes": current_bytes,
+                            "ready_bytes": STREAM_READY_MIN_BYTES,
+                            "file_ready": False,
+                            "selected_media": {
+                                "name": media["name"],
+                                "path": media["path"],
+                                "size": media["size"],
+                                "kind": media["kind"],
+                                "content_type": media["content_type"],
+                            },
+                        })
+                        logger.info(
+                            "stream ws buffering hash=%s media=%s kind=%s bytes=%s/%s",
+                            torrent_hash,
+                            media["name"],
+                            media["kind"],
+                            current_bytes,
+                            STREAM_READY_MIN_BYTES,
+                        )
+                        await asyncio.sleep(1)
+                        continue
 
                     base_url = _http_base_from_websocket(websocket)
                     stream_url = f"{base_url}/stream/{torrent_hash}?token={quote(token, safe='')}"
-                    content_type = video["content_type"]
+                    content_type = media["content_type"]
 
                     await websocket.send_json({
                         "type": "ready",
@@ -649,19 +819,38 @@ async def _stream_wait_ws_impl(websocket: WebSocket, torrent_hash: str):
                         "stream_url": stream_url,
                         "content_type": content_type,
                         "selected_video": {
-                            "name": video["name"],
-                            "path": video["path"],
-                            "size": video["size"],
+                            "name": media["name"],
+                            "path": media["path"],
+                            "size": media["size"],
+                            "kind": media["kind"],
+                            "content_type": content_type,
+                        },
+                        "selected_media": {
+                            "name": media["name"],
+                            "path": media["path"],
+                            "size": media["size"],
+                            "kind": media["kind"],
                             "content_type": content_type,
                         },
                         "subtitles_available": len(subtitle_tracks) > 0,
                         "subtitle_tracks": subtitle_tracks,
                         "message": "Stream ready. Start playback now.",
                     })
+                    logger.info(
+                        "stream ws ready hash=%s media=%s kind=%s content_type=%s subtitles=%s stream_url=%s bytes=%s",
+                        torrent_hash,
+                        media["name"],
+                        media["kind"],
+                        content_type,
+                        len(subtitle_tracks),
+                        stream_url,
+                        current_bytes,
+                    )
                     await websocket.close(code=status.WS_1000_NORMAL_CLOSURE)
                     return
 
             if time.time() - started_at > METADATA_TIMEOUT_SEC:
+                logger.warning("stream ws metadata timeout hash=%s", torrent_hash)
                 await websocket.send_json({
                     "type": "error",
                     "message": "Timed out waiting for torrent metadata",

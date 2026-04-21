@@ -30,34 +30,34 @@
           throw new Error(response?.message || 'Missing stream URL');
         }
 
-        const selectedVideo = response.selected_video?.name || '(unknown)';
+        const selectedMedia = response.selected_media?.name || response.selected_video?.name || '(unknown)';
         const subtitleCount = Array.isArray(response.subtitle_tracks) ? response.subtitle_tracks.length : 0;
-        const contentType = response.content_type || response.selected_video?.content_type || mimeFromVideoName(selectedVideo);
+        const contentType = response.content_type || response.selected_media?.content_type || response.selected_video?.content_type || mimeFromMediaName(selectedMedia);
         const playbackUrl = new URL(response.stream_url, window.location.origin);
         playbackUrl.searchParams.set('token', token);
 
-        currentSelectedVideo = selectedVideo;
+        currentSelectedMedia = selectedMedia;
         currentContentType = contentType;
         updateProgress(response.prepared ? 100 : 0);
 
-        if (!browserCanPlayVideo(selectedVideo, contentType)) {
+        if (!browserCanPlayMedia(selectedMedia, contentType)) {
           setConnection('Browser limited', 'warning');
           setStage('Unsupported', 'warning');
-          playerMeta.textContent = `Selected file ${selectedVideo}${contentType ? ` (${contentType})` : ''} is not playable in this browser. Try an MP4/MOV/WEBM source or open it in the iOS app.`;
-          resultsMeta.textContent = `Prepared ${selectedVideo}, but browser playback is not supported for this format.`;
+          playerMeta.textContent = `Selected file ${selectedMedia}${contentType ? ` (${contentType})` : ''} may need a different browser or codec. Trying playback now...`;
+          resultsMeta.textContent = `Prepared ${selectedMedia}. Browser support may vary by codec.`;
           return;
         }
 
         setConnection(response.prepared ? 'Streaming' : 'Warming up', response.prepared ? 'success' : 'warning');
         setStage(response.prepared ? 'Ready' : 'Preparing', response.prepared ? 'success' : 'warning');
         playerMeta.textContent = response.prepared
-          ? `Now playing: ${selectedVideo} | Subtitles: ${subtitleCount}`
-          : `HTTP stream URL ready for ${selectedVideo}. The torrent is still warming up.`;
+          ? `Now playing: ${selectedMedia} | Subtitles: ${subtitleCount}`
+          : `HTTP stream URL ready for ${selectedMedia}. The torrent is still warming up.`;
 
         streamVideo.src = playbackUrl.toString();
         streamVideo.load();
         try { await streamVideo.play(); } catch (_) {}
-        resultsMeta.textContent = `Streaming ${selectedVideo} over HTTP`;
+        resultsMeta.textContent = `Streaming ${selectedMedia} over HTTP`;
       } catch (error) {
         setConnection('Error', 'danger');
         setStage('Failed', 'danger');
@@ -642,9 +642,9 @@
     <header class="hero">
       <div>
         <span class="eyebrow">TorrentStream demo console</span>
-        <h1>Prepare torrents, watch live stream status, and play the video in-browser.</h1>
+        <h1>Prepare torrents, watch live stream status, and play the media in-browser.</h1>
         <p>
-          Search results feed the HTTP stream prep flow, the server selects the best video file and subtitle tracks,
+          Search results feed the HTTP stream prep flow, the server selects the best media file and subtitle tracks,
           and the browser player starts only when the stream is ready.
         </p>
         <div class="stats-row">
@@ -809,8 +809,56 @@
     const stageChip = document.getElementById('stageChip');
     const authState = document.getElementById('authState');
     const resultsMeta = document.getElementById('resultsMeta');
-    let currentSelectedVideo = '';
+    let currentSelectedMedia = '';
     let currentContentType = '';
+    let streamSocket = null;
+    let streamReady = false;
+    const clientLogPrefix = '[TorrentStream UI]';
+
+    function logClient(message, details) {
+      if (details === undefined) {
+        console.info(`${clientLogPrefix} ${message}`);
+        return;
+      }
+
+      console.info(`${clientLogPrefix} ${message}`, details);
+    }
+
+    function attachMediaDebugLogging() {
+      const events = [
+        'loadstart',
+        'loadedmetadata',
+        'loadeddata',
+        'canplay',
+        'canplaythrough',
+        'waiting',
+        'stalled',
+        'seeking',
+        'seeked',
+        'playing',
+        'pause',
+        'ended',
+      ];
+
+      events.forEach(eventName => {
+        streamVideo.addEventListener(eventName, () => {
+          logClient(`media:${eventName}`, {
+            src: streamVideo.currentSrc || '',
+            currentTime: Math.round(streamVideo.currentTime * 1000) / 1000,
+            readyState: streamVideo.readyState,
+            networkState: streamVideo.networkState,
+          });
+
+          if (eventName === 'waiting') {
+            playerMeta.textContent = 'Media waiting for buffered torrent data...';
+          } else if (eventName === 'stalled') {
+            playerMeta.textContent = 'Media stalled while waiting for torrent bytes...';
+          } else if (eventName === 'loadedmetadata') {
+            playerMeta.textContent = 'Media metadata loaded.';
+          }
+        });
+      });
+    }
 
     function setBadge(el, text, tone = 'accent') {
       el.textContent = text;
@@ -892,13 +940,13 @@
         .replaceAll("'", '&#39;');
     }
 
-    function videoExtension(name) {
+    function mediaExtension(name) {
       const match = String(name || '').toLowerCase().match(/\.([a-z0-9]+)(?:[?#].*)?$/);
       return match ? match[1] : '';
     }
 
-    function mimeFromVideoName(name) {
-      switch (videoExtension(name)) {
+    function mimeFromMediaName(name) {
+      switch (mediaExtension(name)) {
         case 'mp4':
         case 'm4v':
           return 'video/mp4';
@@ -918,20 +966,61 @@
         case 'mpeg':
         case 'mpg':
           return 'video/mpeg';
+        case 'mp3':
+          return 'audio/mpeg';
+        case 'm4a':
+          return 'audio/mp4';
+        case 'aac':
+          return 'audio/aac';
+        case 'wav':
+          return 'audio/wav';
+        case 'flac':
+          return 'audio/flac';
+        case 'ogg':
+        case 'oga':
+          return 'audio/ogg';
+        case 'opus':
+          return 'audio/ogg; codecs=opus';
+        case 'weba':
+          return 'audio/webm';
         default:
           return '';
       }
     }
 
-    function browserCanPlayVideo(videoName, contentType) {
-      const mime = contentType || mimeFromVideoName(videoName);
+    function browserCanPlayMedia(mediaName, contentType) {
+      const mime = contentType || mimeFromMediaName(mediaName);
       if (!mime) return true;
+      if (mime.startsWith('audio/') || mime.startsWith('video/')) {
+        return true;
+      }
       return streamVideo.canPlayType(mime) !== '';
     }
 
+    function buildWsUrl(hash, token) {
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const url = new URL(`${protocol}//${window.location.host}/stream/ws`);
+      url.searchParams.set('hash', hash);
+      url.searchParams.set('token', token);
+      return url.toString();
+    }
+
+    function closeStreamSocket() {
+      if (!streamSocket) return;
+      try {
+        streamSocket.close();
+      } catch (_) {
+        // ignore
+      }
+      streamSocket = null;
+    }
+
     function resetPlayer() {
-      currentSelectedVideo = '';
+      currentSelectedMedia = '';
       currentContentType = '';
+      streamReady = false;
+      closeStreamSocket();
+      logClient('player reset');
       streamVideo.pause();
       streamVideo.removeAttribute('src');
       streamVideo.load();
@@ -948,56 +1037,139 @@
         return;
       }
 
+      logClient('prepare start', {
+        hash,
+        name,
+        magnetLength: magnet ? magnet.length : 0,
+      });
+
       resetPlayer();
       playerMeta.textContent = `Preparing HTTP stream for: ${name}`;
       setConnection('HTTP prep', 'warning');
       setStage('Preparing', 'warning');
       resultsMeta.textContent = `Preparing ${name}…`;
 
-      try {
-        const path = `/stream/magnet/${encodeURIComponent(hash)}?magnet=${encodeURIComponent(magnet)}`;
-        const response = await getJson(path, true);
-        out.textContent = JSON.stringify(response, null, 2);
+      const wsUrl = buildWsUrl(hash, token);
+      streamSocket = new WebSocket(wsUrl);
+      logClient('ws connect', { wsUrl });
 
-        if (!response || !response.stream_url) {
-          throw new Error(response?.message || 'Missing stream URL');
+      streamSocket.onopen = () => {
+        logClient('ws open');
+        setConnection('Socket open', 'success');
+        playerMeta.textContent = 'Socket connected. Waiting for torrent readiness…';
+        try {
+          streamSocket.send(JSON.stringify({ hash, magnet }));
+          logClient('ws magnet sent', { hash, magnetLength: magnet.length });
+        } catch (error) {
+          logClient('ws send failed', { message: error instanceof Error ? error.message : String(error) });
         }
+      };
 
-        const selectedVideo = response.selected_video?.name || '(unknown)';
-        const subtitleCount = Array.isArray(response.subtitle_tracks) ? response.subtitle_tracks.length : 0;
-        const contentType = response.content_type || response.selected_video?.content_type || mimeFromVideoName(selectedVideo);
-        const playbackUrl = new URL(response.stream_url, window.location.origin);
-        playbackUrl.searchParams.set('token', token);
-
-        currentSelectedVideo = selectedVideo;
-        currentContentType = contentType;
-        updateProgress(response.prepared ? 100 : 0);
-
-        if (!browserCanPlayVideo(selectedVideo, contentType)) {
-          setConnection('Browser limited', 'warning');
-          setStage('Unsupported', 'warning');
-          playerMeta.textContent = `Selected file ${selectedVideo}${contentType ? ` (${contentType})` : ''} is not playable in this browser. Try an MP4/MOV/WEBM source or open it in the iOS app.`;
-          resultsMeta.textContent = `Prepared ${selectedVideo}, but browser playback is not supported for this format.`;
+      streamSocket.onmessage = event => {
+        let message;
+        try {
+          message = JSON.parse(event.data);
+        } catch (_) {
           return;
         }
 
-        setConnection(response.prepared ? 'Streaming' : 'Warming up', response.prepared ? 'success' : 'warning');
-        setStage(response.prepared ? 'Ready' : 'Preparing', response.prepared ? 'success' : 'warning');
-        playerMeta.textContent = response.prepared
-          ? `Now playing: ${selectedVideo} | Subtitles: ${subtitleCount}`
-          : `HTTP stream URL ready for ${selectedVideo}. The torrent is still warming up.`;
+        out.textContent = JSON.stringify(message, null, 2);
+        logClient('ws message', message);
 
-        streamVideo.src = playbackUrl.toString();
-        streamVideo.load();
-        try { await streamVideo.play(); } catch (_) {}
-        resultsMeta.textContent = `Streaming ${selectedVideo} over HTTP`;
-      } catch (error) {
-        setConnection('Error', 'danger');
-        setStage('Failed', 'danger');
-        const message = error instanceof Error ? error.message : String(error || 'Unknown error');
-        playerMeta.textContent = `Prepare failed: ${message}`;
-        resultsMeta.textContent = 'HTTP stream preparation failed.';
-      }
+        if (message.type === 'started') {
+          setConnection('Fetching', 'warning');
+          setStage('Started', 'accent');
+          playerMeta.textContent = message.message || 'Torrent session started.';
+          return;
+        }
+
+        if (message.type === 'status') {
+          const fileBytes = Number(message.file_bytes || 0);
+          const readyBytes = Number(message.ready_bytes || 0);
+          const pct = readyBytes > 0 ? Math.min(100, Math.round((fileBytes / readyBytes) * 100)) : Math.round((message.progress || 0) * 100);
+          updateProgress(pct);
+          setConnection(`Bytes ${fileBytes}/${readyBytes || '?'}`, fileBytes >= readyBytes ? 'success' : 'warning');
+          setStage(message.file_ready ? 'Buffering done' : 'Buffering', message.file_ready ? 'success' : 'warning');
+          playerMeta.textContent = message.file_ready
+            ? 'First chunk ready. Starting playback…'
+            : `Waiting for first chunk… ${pct}% | peers: ${message.num_peers || 0}`;
+          return;
+        }
+
+        if (message.type === 'ready') {
+          streamReady = true;
+          const selectedMedia = message.selected_media?.name || message.selected_video?.name || name;
+          const contentType = message.content_type || message.selected_media?.content_type || message.selected_video?.content_type || mimeFromMediaName(selectedMedia);
+          const mediaKind = message.selected_media?.kind || message.selected_video?.kind || (contentType.startsWith('audio/') ? 'audio' : 'video');
+          const streamUrl = message.stream_url;
+
+          currentSelectedMedia = selectedMedia;
+          currentContentType = contentType;
+          logClient('ws ready received', {
+            selectedMedia,
+            mediaKind,
+            contentType,
+            streamUrl,
+          });
+
+          if (!browserCanPlayMedia(selectedMedia, contentType)) {
+            setConnection('Browser limited', 'warning');
+            setStage('Unsupported', 'warning');
+            playerMeta.textContent = `Selected file ${selectedMedia}${contentType ? ` (${contentType})` : ''} may need a different browser or codec. Trying playback now...`;
+            resultsMeta.textContent = `Prepared ${selectedMedia}. Browser support may vary by codec.`;
+            closeStreamSocket();
+            return;
+          }
+
+          streamVideo.src = streamUrl;
+          streamVideo.load();
+          void streamVideo.play()
+            .then(() => {
+              logClient('video play requested');
+            })
+            .catch(error => {
+              logClient('video play rejected', {
+                message: error instanceof Error ? error.message : String(error),
+              });
+            });
+
+          setConnection('Streaming', 'success');
+          setStage('Ready', 'success');
+          playerMeta.textContent = `Now playing: ${selectedMedia}`;
+          resultsMeta.textContent = `Streaming ${selectedMedia} over HTTP`;
+          closeStreamSocket();
+          return;
+        }
+
+        if (message.type === 'error') {
+          logClient('ws error message', message);
+          setConnection('Error', 'danger');
+          setStage('Failed', 'danger');
+          playerMeta.textContent = `Prepare failed: ${message.message || 'Unknown error'}`;
+          resultsMeta.textContent = 'Websocket preparation failed.';
+          closeStreamSocket();
+          return;
+        }
+
+        if (message.message) {
+          playerMeta.textContent = message.message;
+        }
+      };
+
+      streamSocket.onerror = () => {
+        logClient('ws error');
+        setConnection('Socket error', 'danger');
+        playerMeta.textContent = 'Socket error while preparing stream.';
+      };
+
+      streamSocket.onclose = evt => {
+        logClient('ws close', { code: evt.code, ready: streamReady });
+        if (!streamReady && evt.code !== 1000) {
+          setConnection('Disconnected', 'danger');
+          playerMeta.textContent = `Socket closed (${evt.code}).`;
+          resultsMeta.textContent = 'Socket disconnected before playback started.';
+        }
+      };
     }
 
     function renderResults(data) {
@@ -1070,8 +1242,10 @@
       e.preventDefault();
       const email = document.getElementById('regEmail').value;
       const password = document.getElementById('regPassword').value;
+      logClient('register submit', { email });
       setAuth('Creating account…', 'warning');
       const response = await postJson('/auth/register', { email, password });
+      logClient('register response', response);
       out.textContent = JSON.stringify(response, null, 2);
       if (response && response.access_token) {
         setStoredToken(response.access_token);
@@ -1085,8 +1259,10 @@
       e.preventDefault();
       const email = document.getElementById('loginEmail').value;
       const password = document.getElementById('loginPassword').value;
+      logClient('login submit', { email });
       setAuth('Signing in…', 'warning');
       const response = await postJson('/auth/login', { email, password });
+      logClient('login response', response);
       out.textContent = JSON.stringify(response, null, 2);
       if (response && response.access_token) {
         setStoredToken(response.access_token);
@@ -1111,9 +1287,14 @@
       const category = document.getElementById('searchCategory').value;
       if (!query) return;
 
+      logClient('search submit', { query, category });
       resultsMeta.textContent = 'Searching…';
       const path = `/search/?query=${encodeURIComponent(query)}&category=${encodeURIComponent(category)}`;
       const response = await getJson(path, true);
+      logClient('search response', {
+        results: Array.isArray(response?.data) ? response.data.length : 0,
+        path,
+      });
       out.textContent = JSON.stringify(response, null, 2);
       renderResults(response);
     });
@@ -1128,11 +1309,19 @@
     document.getElementById('clearPlayerHero').addEventListener('click', resetPlayer);
 
     streamVideo.addEventListener('waiting', () => {
+      logClient('media waiting', {
+        src: streamVideo.currentSrc || '',
+        readyState: streamVideo.readyState,
+      });
       playerMeta.textContent = 'Player buffering... waiting for torrent pieces.';
       setStage('Buffering', 'warning');
     });
 
     streamVideo.addEventListener('playing', () => {
+      logClient('media playing', {
+        src: streamVideo.currentSrc || '',
+        currentTime: Math.round(streamVideo.currentTime * 1000) / 1000,
+      });
       if (streamVideo.currentSrc) {
         playerMeta.textContent = `Playing stream: ${streamVideo.currentSrc}`;
         setStage('Playing', 'success');
@@ -1144,7 +1333,7 @@
       const mediaError = streamVideo.error;
       if (!mediaError) {
         playerMeta.textContent = 'Playback failed: unknown media error.';
-        setStage('Video error', 'danger');
+        setStage('Media error', 'danger');
         return;
       }
 
@@ -1154,13 +1343,19 @@
         3: 'MEDIA_ERR_DECODE',
         4: 'MEDIA_ERR_SRC_NOT_SUPPORTED',
       };
-      const sourceHint = currentSelectedVideo
-        ? ` Selected file ${currentSelectedVideo}${currentContentType ? ` (${currentContentType})` : ''} is not playable in this browser.`
-        : ' Try an MP4/MOV/WEBM source with active seeders.';
+      logClient('media error', {
+        code: mediaError.code,
+        message: codeMap[mediaError.code] || String(mediaError.code),
+        src: streamVideo.currentSrc || '',
+      });
+      const sourceHint = currentSelectedMedia
+        ? ` Selected file ${currentSelectedMedia}${currentContentType ? ` (${currentContentType})` : ''} is not playable in this browser.`
+        : ' Try an MP4/MOV/WEBM/MP3/M4A/MKV source with active seeders.';
       playerMeta.textContent = `Playback failed: ${codeMap[mediaError.code] || mediaError.code}.${sourceHint}`;
-      setStage('Video error', 'danger');
+      setStage('Media error', 'danger');
     });
 
+    attachMediaDebugLogging();
     renderToken();
     resetPlayer();
     resultsMeta.textContent = 'Ready to search.';
